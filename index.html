@@ -1,0 +1,418 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PU 活动签到二维码生成器</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; background: #f5f6f7; color: #222; font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    button, input { font: inherit; }
+    button { cursor: pointer; }
+    .manager { max-width: 520px; margin: 0 auto; padding: 28px 16px; }
+    .manager h1 { margin: 0 0 20px; font-size: 22px; }
+    .form { padding: 18px; background: #fff; border: 1px solid #e5e6e8; border-radius: 6px; }
+    .field { margin-bottom: 14px; }
+    .field label { display: block; margin-bottom: 5px; }
+    .field input { width: 100%; padding: 9px 10px; border: 1px solid #cfd2d6; border-radius: 4px; }
+    .primary { width: 100%; padding: 10px; border: 0; border-radius: 4px; background: #1677ff; color: #fff; }
+    .import-form { margin-top: 20px; }
+    .import-form h2 { margin: 0 0 14px; font-size: 16px; }
+    .import-form input[type="file"] { padding: 7px; background: #fff; }
+    .status { min-height: 22px; margin: 10px 0 0; color: #666; font-size: 13px; }
+    .records { margin-top: 20px; }
+    .records h2 { margin: 0 0 10px; font-size: 16px; }
+    .record { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; padding: 10px 12px; background: #fff; border: 1px solid #e5e6e8; border-radius: 4px; }
+    .record-name { flex: 1; overflow: hidden; color: #1677ff; text-overflow: ellipsis; white-space: nowrap; }
+    .delete { border: 0; background: transparent; color: #d4380d; }
+    .empty { color: #888; }
+.aminui {
+  display: flex;
+  position: static;
+  width: 452.516px;
+  height: 682.271px;
+  min-height: 682.271px;
+  margin: 0px;
+  padding: 0px;
+  background: rgb(248, 248, 248) none repeat scroll 0% 0% / auto padding-box border-box;
+  border: 0px solid rgb(229, 231, 235);
+  border-radius: 0px;
+  box-shadow: none;
+  color: rgb(36, 36, 36);
+  font-size: 16.8745px;
+  font-weight: 400;
+  line-height: 25.3118px;
+  text-align: start;
+  word-break: break-all;
+  flex-direction: column;
+  justify-content: normal;
+  align-items: normal;
+}
+
+.activityCode {
+  display: block;
+  position: static;
+  width: 452.516px;
+  height: 682.271px;
+  min-height: auto;
+  margin: 0px;
+  padding: 0px;
+  background: rgba(0, 0, 0, 0) linear-gradient(1deg, rgb(253, 239, 232), rgb(255, 220, 190) 98%) repeat scroll 0% 0% / auto padding-box border-box;
+  border: 0px solid rgb(229, 231, 235);
+  border-radius: 0px;
+  box-shadow: none;
+  color: rgb(36, 36, 36);
+  font-size: 16.8745px;
+  font-weight: 400;
+  line-height: 25.3118px;
+  text-align: start;
+  word-break: break-all;
+  flex-direction: row;
+  justify-content: normal;
+  align-items: normal;
+}
+
+.scan-sign {
+  display: flex;
+  position: static;
+  width: 413.96px;
+  height: 474.871px;
+  min-height: 0px;
+  margin: 60.2665px auto 0px;
+  padding: 0px 0px 28.928px;
+  background: rgb(255, 255, 255) none repeat scroll 0% 0% / auto padding-box border-box;
+  border: 0px solid rgb(229, 231, 235);
+  border-radius: 24.1065px;
+  box-shadow: none;
+  color: rgb(36, 36, 36);
+  font-size: 16.8745px;
+  font-weight: 400;
+  line-height: 25.3118px;
+  text-align: start;
+  word-break: break-all;
+  flex-direction: column;
+  justify-content: normal;
+  align-items: center;
+}
+
+.title {
+  display: block;
+  position: static;
+  width: 372.562px;
+  height: 26.5167px;
+  min-height: auto;
+  margin: 28.928px 0px 0px;
+  padding: 0px;
+  background: rgba(0, 0, 0, 0) none repeat scroll 0% 0% / auto padding-box border-box;
+  border: 0px solid rgb(229, 231, 235);
+  border-radius: 0px;
+  box-shadow: none;
+  color: rgb(67, 68, 71);
+  font-size: 19.2855px;
+  font-weight: 500;
+  line-height: 28.9282px;
+  text-align: center;
+  word-break: break-all;
+  flex-direction: row;
+  justify-content: normal;
+  align-items: normal;
+  max-width: calc(100% - 40px);
+}
+
+.uid {
+  display: block;
+  position: static;
+  width: 188.324px;
+  height: 19.2864px;
+  min-height: auto;
+  margin: 7.232px 0px 28.928px;
+  padding: 0px;
+  background: rgba(0, 0, 0, 0) none repeat scroll 0% 0% / auto padding-box border-box;
+  border: 0px solid rgb(229, 231, 235);
+  border-radius: 0px;
+  box-shadow: none;
+  color: rgb(67, 68, 71);
+  font-size: 14.464px;
+  font-weight: 400;
+  line-height: 19.2855px;
+  text-align: center;
+  word-break: break-all;
+  flex-direction: row;
+  justify-content: normal;
+  align-items: normal;
+}
+
+.img-content {
+  display: block;
+  position: static;
+  width: 289.279px;
+  height: 289.279px;
+  min-height: auto;
+  margin: 0px;
+  padding: 0px;
+  background: rgba(0, 0, 0, 0) none repeat scroll 0% 0% / auto padding-box border-box;
+  border: 0px solid rgb(229, 231, 235);
+  border-radius: 0px;
+  box-shadow: none;
+  color: rgb(36, 36, 36);
+  font-size: 16.8745px;
+  font-weight: 400;
+  line-height: 25.3118px;
+  text-align: start;
+  word-break: break-all;
+  flex-direction: row;
+  justify-content: normal;
+  align-items: normal;
+}
+
+.time-tip {
+  display: flex;
+  position: static;
+  width: 255.524px;
+  height: 31.3341px;
+  min-height: auto;
+  margin: 14.464px 0px 0px;
+  padding: 0px;
+  background: rgb(248, 248, 248) none repeat scroll 0% 0% / auto padding-box border-box;
+  border: 0px solid rgb(229, 231, 235);
+  border-radius: 15.6695px;
+  box-shadow: none;
+  color: rgb(36, 36, 36);
+  font-size: 16.8745px;
+  font-weight: 400;
+  line-height: 25.3118px;
+  text-align: start;
+  word-break: break-all;
+  flex-direction: row;
+  justify-content: center;
+  align-items: center;
+}
+
+.time-tip .text {
+  display: block;
+  position: static;
+  width: 174.334px;
+  height: 31.3425px;
+  min-height: auto;
+  margin: 0px;
+  padding: 0px;
+  background: rgba(0, 0, 0, 0) none repeat scroll 0% 0% / auto padding-box border-box;
+  border: 0px solid rgb(229, 231, 235);
+  border-radius: 0px;
+  box-shadow: none;
+  color: rgb(102, 102, 102);
+  font-size: 14.464px;
+  font-weight: 400;
+  line-height: 31.3385px;
+  text-align: right;
+  word-break: break-all;
+  flex-direction: row;
+  justify-content: normal;
+  align-items: normal;
+}
+
+.time-tip .sec {
+  display: block;
+  position: static;
+  width: 25.5498px;
+  height: 31.3425px;
+  min-height: auto;
+  margin: 0px;
+  padding: 0px;
+  background: rgba(0, 0, 0, 0) none repeat scroll 0% 0% / auto padding-box border-box;
+  border: 0px solid rgb(229, 231, 235);
+  border-radius: 0px;
+  box-shadow: none;
+  color: rgb(255, 125, 16);
+  font-size: 14.464px;
+  font-weight: 500;
+  line-height: 31.3385px;
+  text-align: right;
+  word-break: break-all;
+  flex-direction: row;
+  justify-content: normal;
+  align-items: normal;
+}  </style>
+</head>
+<body>
+  <div id="app"></div>
+  <!-- 自行找对应库哦 -->
+  <script src="crypto-js.min.js"></script>
+  <script src="qrcode.min.js"></script>
+  <script src="jsQR.js"></script>
+  <script>
+    const STORAGE_KEY = "Temp_MyPU_QR_Records";
+    const KEY = "TG123!@#qazDES*&^956367encode7788TR";//按理只要前8位, 不知道开发者咋想的
+
+    const encrypt = (text, key) => {
+      const parsedKey = CryptoJS.enc.Utf8.parse(key);
+      return CryptoJS.DES.encrypt(text, parsedKey, {
+        mode: CryptoJS.mode.ECB,
+        padding: CryptoJS.pad.Pkcs7
+      }).toString();
+    };
+
+    const readRecords = () => JSON.parse(localStorage.getItem(STORAGE_KEY) || "[]");
+    const writeRecords = records => localStorage.setItem(STORAGE_KEY, JSON.stringify(records));
+    const app = document.getElementById("app");
+
+    function renderManager() {
+      app.className = "";
+      app.innerHTML = `
+        <main class="manager">
+          <h1>pu二维码管理</h1>
+          <form class="form" id="record-form">
+            <div class="field"><label for="uid">UID</label><input id="uid" required inputmode="numeric" placeholder="二维码页面展示的uid"></div>
+            <div class="field"><label for="student">学号</label><input id="student" required inputmode="numeric" placeholder="登录时的用户名"></div>
+            <div class="field"><label for="remark">备注</label><input id="remark" required maxlength="40" placeholder="如我的账号"></div>
+            <button class="primary" type="submit">保存</button>
+          </form>
+          <form class="form import-form" id="import-form">
+            <h2>一键导入二维码</h2>
+            <div class="field"><label for="qr-file">二维码图片</label><input id="qr-file" type="file" accept="image/*" required></div>
+            <div class="field"><label for="import-remark">备注</label><input id="import-remark" required maxlength="40" placeholder="如我的账号"></div>
+            <button class="primary" type="submit">识别并导入</button>
+            <p class="status" id="import-status"></p>
+          </form>
+          <section class="records"><h2>已保存</h2><div id="record-list"></div></section>
+        </main>`;
+
+      const list = document.getElementById("record-list");
+      const records = readRecords();
+      list.innerHTML = records.length ? records.map(record => `
+        <div class="record">
+          <button class="record-name" data-open="${record.id}">${escapeHtml(record.remark)}</button>
+          <button class="delete" data-delete="${record.id}" aria-label="删除">删除</button>
+        </div>`).join("") : '<div class="empty">暂无记录</div>';
+
+      document.getElementById("record-form").addEventListener("submit", event => {
+        event.preventDefault();
+        const record = {
+          id: String(Date.now()),
+          uid: document.getElementById("uid").value.trim(),
+          student: document.getElementById("student").value.trim(),
+          remark: document.getElementById("remark").value.trim()
+        };
+        writeRecords([...readRecords(), record]);
+        renderQr(record);
+      });
+
+      document.getElementById("import-form").addEventListener("submit", async event => {
+        event.preventDefault();
+        const status = document.getElementById("import-status");
+        const file = document.getElementById("qr-file").files[0];
+        const remark = document.getElementById("import-remark").value.trim();
+        status.textContent = "正在识别二维码...";
+        try {
+          const payload = await readQrImage(file);
+          const imported = parseQrPayload(payload);
+          const record = { id: String(Date.now()), uid: imported.uid, student: imported.student, remark };
+          writeRecords([...readRecords(), record]);
+          renderQr(record);
+        } catch (error) {
+          status.textContent = error.message || "二维码识别失败, 请选择清晰的二维码图片.";
+        }
+      });
+
+      list.addEventListener("click", event => {
+        const openId = event.target.dataset.open;
+        const deleteId = event.target.dataset.delete;
+        if (openId) {
+          const record = readRecords().find(item => item.id === openId);
+          if (record) renderQr(record);
+        }
+        if (deleteId && confirm("删除这条记录？")) {
+          writeRecords(readRecords().filter(item => item.id !== deleteId));
+          renderManager();
+        }
+      });
+    }
+
+    function renderQr(record) {
+      let seconds = 10;
+      app.className = "aminui";
+      app.innerHTML = `<div class="activityCode"><div class="scan-sign"><div class="title">用于PU活动签到</div><div class="uid">我的UID为: ${escapeHtml(record.uid)}</div><div class="img-content" id="qr"></div><div class="time-tip"><p class="text">二维码自动更新, 有效时间</p><p class="sec" id="seconds">10s</p></div></div></div>`;
+      enterFullscreen();
+      const draw = () => {
+        const plainText = `xyhui://user/${record.uid}/${Math.floor(Date.now() / 1000)}/${record.student}`;
+        const encodedText = encrypt(plainText, KEY);
+        const qr = document.getElementById("qr");
+        qr.innerHTML = "";
+        new QRCode(qr, { text: encodedText, width: 289, height: 289, correctLevel: QRCode.CorrectLevel.M });
+      };
+      draw();
+      const timer = setInterval(() => {
+        seconds -= 1;
+        const counter = document.getElementById("seconds");
+        if (!counter) return clearInterval(timer);
+        counter.textContent = seconds + "s";
+        if (seconds <= 0) { seconds = 10; draw(); }
+      }, 1000);
+    }
+
+    function enterFullscreen() {
+      const request = document.documentElement.requestFullscreen || document.documentElement.webkitRequestFullscreen;
+      if (request && !document.fullscreenElement && !document.webkitFullscreenElement) {
+        const result = request.call(document.documentElement);
+        if (result && result.catch) result.catch(() => {});
+      }
+    }
+
+    function readQrImage(file) {
+      if (!file) return Promise.reject(new Error("请选择二维码图片."));
+      return new Promise((resolve, reject) => {
+        const image = new Image();
+        image.onload = async () => {
+          try {
+            if ("BarcodeDetector" in window) {
+              try {
+                const detector = new BarcodeDetector({ formats: ["qr_code"] });
+                const results = await detector.detect(image);
+                if (results[0] && results[0].rawValue) return resolve(results[0].rawValue);
+              } catch (error) {}
+            }
+            const canvas = document.createElement("canvas");
+            canvas.width = image.naturalWidth;
+            canvas.height = image.naturalHeight;
+            const context = canvas.getContext("2d");
+            context.drawImage(image, 0, 0);
+            const pixels = context.getImageData(0, 0, canvas.width, canvas.height);
+            if (typeof jsQR === "function") {
+              const result = jsQR(pixels.data, pixels.width, pixels.height);
+              if (result) return resolve(result.data);
+            }
+            reject(new Error("没有识别到二维码, 请使用清晰的二维码截图."));
+          } catch (error) {
+            reject(new Error("二维码识别失败, 请重试."));
+          } finally {
+            URL.revokeObjectURL(image.src);
+          }
+        };
+        image.onerror = () => reject(new Error("无法读取图片."));
+        image.src = URL.createObjectURL(file);
+      });
+    }
+
+    function parseQrPayload(payload) {
+      let plainText = payload;
+      try {
+        const parsedKey = CryptoJS.enc.Utf8.parse(KEY);
+        const decrypted = CryptoJS.DES.decrypt(payload, parsedKey, {
+          mode: CryptoJS.mode.ECB,
+          padding: CryptoJS.pad.Pkcs7
+        }).toString(CryptoJS.enc.Utf8);
+        if (decrypted) plainText = decrypted;
+      } catch (error) {}
+      const match = plainText.match(/^xyhui:\/\/user\/([^/]+)\/[^/]+\/([^/?#]+)$/);
+      if (!match) throw new Error("二维码内容不是有效的pu签到二维码.");
+      return { uid: match[1], student: match[2] };
+    }
+
+    function escapeHtml(value) {
+      return String(value).replace(/[&<>"']/g, char => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;" }[char]));
+    }
+
+    renderManager();
+  </script>
+</body>
+</html>
