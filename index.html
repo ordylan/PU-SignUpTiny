@@ -28,10 +28,9 @@
     .empty { color: #888; }
 .aminui {
   display: flex;
-  position: static;
-  width: 452.516px;
-  height: 682.271px;
-  min-height: 682.271px;
+  position: relative;
+  width: 100%;
+  min-height: 100vh;
   margin: 0px;
   padding: 0px;
   background: rgb(248, 248, 248) none repeat scroll 0% 0% / auto padding-box border-box;
@@ -50,11 +49,10 @@
 }
 
 .activityCode {
-  display: block;
+  display: flex;
   position: static;
-  width: 452.516px;
-  height: 682.271px;
-  min-height: auto;
+  width: 100%;
+  min-height: 100vh;
   margin: 0px;
   padding: 0px;
   background: rgba(0, 0, 0, 0) linear-gradient(1deg, rgb(253, 239, 232), rgb(255, 220, 190) 98%) repeat scroll 0% 0% / auto padding-box border-box;
@@ -67,18 +65,52 @@
   line-height: 25.3118px;
   text-align: start;
   word-break: break-all;
-  flex-direction: row;
-  justify-content: normal;
+  flex-direction: column;
+  justify-content: flex-start;
   align-items: normal;
+}
+
+.qr-header {
+  display: flex;
+  position: relative;
+  width: 100%;
+  height: 112px;
+  flex: 0 0 112px;
+  align-items: center;
+  justify-content: center;
+}
+
+.qr-header h1 {
+  margin: 0;
+  color: #242424;
+  font-size: 32px;
+  font-weight: 700;
+  line-height: 1.2;
+}
+
+.qr-back {
+  position: absolute;
+  left: 22px;
+  top: 50%;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: #424242;
+  font-size: 42px;
+  font-weight: 300;
+  line-height: 24px;
+  transform: translateY(-50%);
 }
 
 .scan-sign {
   display: flex;
   position: static;
-  width: 413.96px;
-  height: 474.871px;
+  width: min(413.96px, calc(100% - 32px));
+  min-height: 474.871px;
   min-height: 0px;
-  margin: 60.2665px auto 0px;
+  margin: 18px auto 24px;
   padding: 0px 0px 28.928px;
   background: rgb(255, 255, 255) none repeat scroll 0% 0% / auto padding-box border-box;
   border: 0px solid rgb(229, 231, 235);
@@ -98,7 +130,7 @@
 .title {
   display: block;
   position: static;
-  width: 372.562px;
+  width: min(372.562px, calc(100% - 40px));
   height: 26.5167px;
   min-height: auto;
   margin: 28.928px 0px 0px;
@@ -122,7 +154,7 @@
 .uid {
   display: block;
   position: static;
-  width: 188.324px;
+  width: calc(100% - 40px);
   height: 19.2864px;
   min-height: auto;
   margin: 7.232px 0px 28.928px;
@@ -145,8 +177,9 @@
 .img-content {
   display: block;
   position: static;
-  width: 289.279px;
-  height: 289.279px;
+  width: min(289.279px, calc(100% - 48px));
+  height: auto;
+  aspect-ratio: 1;
   min-height: auto;
   margin: 0px;
   padding: 0px;
@@ -168,7 +201,7 @@
 .time-tip {
   display: flex;
   position: static;
-  width: 255.524px;
+  width: min(255.524px, calc(100% - 40px));
   height: 31.3341px;
   min-height: auto;
   margin: 14.464px 0px 0px;
@@ -261,6 +294,7 @@
       app.innerHTML = `
         <main class="manager">
           <h1>pu二维码管理</h1>
+          <section class="records"><h2>已保存</h2><div id="record-list"></div></section>
           <form class="form" id="record-form">
             <div class="field"><label for="uid">UID</label><input id="uid" required inputmode="numeric" placeholder="二维码页面展示的uid"></div>
             <div class="field"><label for="student">学号</label><input id="student" required inputmode="numeric" placeholder="登录时的用户名"></div>
@@ -274,8 +308,7 @@
             <button class="primary" type="submit">识别并导入</button>
             <p class="status" id="import-status"></p>
           </form>
-          <section class="records"><h2>已保存</h2><div id="record-list"></div></section>
-        </main>`;
+                  </main>`;
 
       const list = document.getElementById("record-list");
       const records = readRecords();
@@ -331,14 +364,20 @@
     function renderQr(record) {
       let seconds = 10;
       app.className = "aminui";
-      app.innerHTML = `<div class="activityCode"><div class="scan-sign"><div class="title">用于PU活动签到</div><div class="uid">我的UID为: ${escapeHtml(record.uid)}</div><div class="img-content" id="qr"></div><div class="time-tip"><p class="text">二维码自动更新, 有效时间</p><p class="sec" id="seconds">10s</p></div></div></div>`;
+      app.innerHTML = `<div class="activityCode"><header class="qr-header"><button class="qr-back" type="button" aria-label="返回">‹</button><h1>我的二维码</h1></header><main class="scan-sign"><div class="title">用于PU活动签到</div><div class="uid">我的UID为: ${escapeHtml(record.uid)}</div><div class="img-content" id="qr"></div><div class="time-tip"><p class="text">二维码自动更新, 有效时间</p><p class="sec" id="seconds">10s</p></div></main></div>`;
+      document.querySelector(".qr-back").addEventListener("click", renderManager);
       enterFullscreen();
       const draw = () => {
         const plainText = `xyhui://user/${record.uid}/${Math.floor(Date.now() / 1000)}/${record.student}`;
         const encodedText = encrypt(plainText, KEY);
         const qr = document.getElementById("qr");
         qr.innerHTML = "";
-        new QRCode(qr, { text: encodedText, width: 289, height: 289, correctLevel: QRCode.CorrectLevel.M });
+        new QRCode(qr, {
+          text: encodedText,
+          width: 289,
+          height: 289,
+          correctLevel: QRCode.CorrectLevel.H
+        });
       };
       draw();
       const timer = setInterval(() => {
