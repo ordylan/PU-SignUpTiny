@@ -1,0 +1,15 @@
+{
+  "username": "",
+  "password": "",
+  "sid": 243205312479232,
+  "college": "人工智能与信息技术学院",
+  "excluded_credits": "文体社科||思想成长",
+  "advance_ms": 150,
+  "service_refresh_minutes": 28,
+  "service_rest_time": "23:00-8:00",
+  "service": false,
+  "ntfy_server": "https://ntfy.sh/",
+  "ntfy_topic": "MyPUSignup",
+  "ntfy_username": "",
+  "ntfy_password": ""
+}

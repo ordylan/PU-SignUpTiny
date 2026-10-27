@@ -1,19 +1,32 @@
+#ifdef _WIN32
 #include <windows.h>
-#include <winhttp.h>
+#include <bcrypt.h>
+#include <wincrypt.h>
+#else
+#include <openssl/evp.h>
+#include <openssl/rand.h>
+#include <unistd.h>
+#endif
+#include <algorithm>
 #include <cstdlib>
-#include <cstring>
 #include <ctime>
 #include <chrono>
 #include <cstdint>
 #include <iomanip>
+#include <fstream>
+#include <filesystem>
 #include <iostream>
+#include <memory>
 #include <mutex>
 #include <random>
+#include <set>
 #include <sstream>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 #include "libs/json.hpp"
+#include "src/http.hpp"
 
 using json = nlohmann::ordered_json;
 using namespace std::chrono;
@@ -22,22 +35,34 @@ static std::string USERNAME;
 static std::string PASSWORD;
 static long long   SCHOOL_ID;
 static std::string ACTIVITY_ID;
-static const int   ADVANCE_MS  = 150;
-
+static int         ADVANCE_MS  = 150;
+static constexpr int LIST_PAGE_SIZE = 10;
+static constexpr int LIST_PAGE_DELAY_MS = 800;
+static constexpr int DETAIL_REQUEST_DELAY_MS = 1200;
 static const std::string LOGIN_URL = "https://apis.pocketuni.net/uc/user/login";
-static const std::string INFO_URL  = "https://apis.pocketuni.net/apis/activity/info";
+static const std::string INFO_URL  = "https://apis.pocketuni.net/activity/basic/info/";
 static const std::string JOIN_URL  = "https://apis.pocketuni.net/apis/activity/join";
+static const std::string LIST_URL  = "https://apis.pocketuni.net/apis/activity/list";
+static const std::string VERSION_URL = "https://class.pocketuni.net/version.json?t=";
+
+#define PROGRAM_VERSION "V_12731792034892744"
 
 static const uint8_t PSK[16] = {
     121, 121, 0, 19, 5, 49, 2, 43, 13, 17, 11, 9, 4, 29, 60, 11
 };
 
 static std::mutex g_log_mtx;
+static std::mutex g_joined_mtx;
+static std::set<std::string> g_pending_activities;
 
 static std::string now_str() {
     auto t = system_clock::to_time_t(system_clock::now());
     std::tm tm{};
+#ifdef _WIN32
     localtime_s(&tm, &t);
+#else
+    localtime_r(&t, &tm);
+#endif
     char buf[32];
     std::strftime(buf, sizeof(buf), "%H:%M:%S", &tm);
     return buf;
@@ -57,155 +82,30 @@ static void log_line(const char* tag, Args&&... args) {
 #define LOG_ERR(...)  log_line("ERROR", __VA_ARGS__)
 #define LOG_DBG(...)  log_line("DEBUG", __VA_ARGS__)
 
-// ==================== AES-128-CBC + PKCS7 ====================
-namespace aes {
-
-static const uint8_t sbox[256] = {
-    0x63,0x7c,0x77,0x7b,0xf2,0x6b,0x6f,0xc5,0x30,0x01,0x67,0x2b,0xfe,0xd7,0xab,0x76,
-    0xca,0x82,0xc9,0x7d,0xfa,0x59,0x47,0xf0,0xad,0xd4,0xa2,0xaf,0x9c,0xa4,0x72,0xc0,
-    0xb7,0xfd,0x93,0x26,0x36,0x3f,0xf7,0xcc,0x34,0xa5,0xe5,0xf1,0x71,0xd8,0x31,0x15,
-    0x04,0xc7,0x23,0xc3,0x18,0x96,0x05,0x9a,0x07,0x12,0x80,0xe2,0xeb,0x27,0xb2,0x75,
-    0x09,0x83,0x2c,0x1a,0x1b,0x6e,0x5a,0xa0,0x52,0x3b,0xd6,0xb3,0x29,0xe3,0x2f,0x84,
-    0x53,0xd1,0x00,0xed,0x20,0xfc,0xb1,0x5b,0x6a,0xcb,0xbe,0x39,0x4a,0x4c,0x58,0xcf,
-    0xd0,0xef,0xaa,0xfb,0x43,0x4d,0x33,0x85,0x45,0xf9,0x02,0x7f,0x50,0x3c,0x9f,0xa8,
-    0x51,0xa3,0x40,0x8f,0x92,0x9d,0x38,0xf5,0xbc,0xb6,0xda,0x21,0x10,0xff,0xf3,0xd2,
-    0xcd,0x0c,0x13,0xec,0x5f,0x97,0x44,0x17,0xc4,0xa7,0x7e,0x3d,0x64,0x5d,0x19,0x73,
-    0x60,0x81,0x4f,0xdc,0x22,0x2a,0x90,0x88,0x46,0xee,0xb8,0x14,0xde,0x5e,0x0b,0xdb,
-    0xe0,0x32,0x3a,0x0a,0x49,0x06,0x24,0x5c,0xc2,0xd3,0xac,0x62,0x91,0x95,0xe4,0x79,
-    0xe7,0xc8,0x37,0x6d,0x8d,0xd5,0x4e,0xa9,0x6c,0x56,0xf4,0xea,0x65,0x7a,0xae,0x08,
-    0xba,0x78,0x25,0x2e,0x1c,0xa6,0xb4,0xc6,0xe8,0xdd,0x74,0x1f,0x4b,0xbd,0x8b,0x8a,
-    0x70,0x3e,0xb5,0x66,0x48,0x03,0xf6,0x0e,0x61,0x35,0x57,0xb9,0x86,0xc1,0x1d,0x9e,
-    0xe1,0xf8,0x98,0x11,0x69,0xd9,0x8e,0x94,0x9b,0x1e,0x87,0xe9,0xce,0x55,0x28,0xdf,
-    0x8c,0xa1,0x89,0x0d,0xbf,0xe6,0x42,0x68,0x41,0x99,0x2d,0x0f,0xb0,0x54,0xbb,0x16
-};
-
-static const uint8_t Rcon[11] = {
-    0x00,0x01,0x02,0x04,0x08,0x10,0x20,0x40,0x80,0x1b,0x36
-};
-
-static void key_expansion(const uint8_t* key, uint8_t* rk) {
-    for (int i = 0; i < 16; ++i) rk[i] = key[i];
-    for (int i = 4; i < 44; ++i) {
-        uint8_t t[4];
-        for (int j = 0; j < 4; ++j) t[j] = rk[(i - 1) * 4 + j];
-        if (i % 4 == 0) {
-            uint8_t tmp = t[0];
-            t[0] = (uint8_t)(sbox[t[1]] ^ Rcon[i / 4]);
-            t[1] = sbox[t[2]];
-            t[2] = sbox[t[3]];
-            t[3] = sbox[tmp];
-        }
-        for (int j = 0; j < 4; ++j)
-            rk[i * 4 + j] = (uint8_t)(rk[(i - 4) * 4 + j] ^ t[j]);
-    }
-}
-
-static inline uint8_t xtime(uint8_t x) {
-    return (uint8_t)((x << 1) ^ ((x >> 7) * 0x1b));
-}
-
-static uint8_t gmul(uint8_t a, uint8_t b) {
-    uint8_t p = 0;
-    while (b) {
-        if (b & 1) p ^= a;
-        a = xtime(a);
-        b >>= 1;
-    }
-    return p;
-}
-
-static inline void add_round_key(uint8_t* s, const uint8_t* rk) {
-    for (int i = 0; i < 16; ++i) s[i] ^= rk[i];
-}
-
-static inline void sub_bytes(uint8_t* s) {
-    for (int i = 0; i < 16; ++i) s[i] = sbox[s[i]];
-}
-
-static inline void shift_rows(uint8_t* s) {
-    uint8_t t;
-    t = s[1];  s[1]  = s[5];  s[5]  = s[9];  s[9]  = s[13]; s[13] = t;
-    t = s[2];  s[2]  = s[10]; s[10] = t;
-    t = s[6];  s[6]  = s[14]; s[14] = t;
-    t = s[15]; s[15] = s[11]; s[11] = s[7];  s[7]  = s[3];  s[3]  = t;
-}
-
-static void mix_columns(uint8_t* s) {
-    for (int c = 0; c < 4; ++c) {
-        uint8_t a = s[c * 4 + 0];
-        uint8_t b = s[c * 4 + 1];
-        uint8_t d = s[c * 4 + 2];
-        uint8_t e = s[c * 4 + 3];
-        s[c * 4 + 0] = (uint8_t)(gmul(a, 2) ^ gmul(b, 3) ^ d ^ e);
-        s[c * 4 + 1] = (uint8_t)(a ^ gmul(b, 2) ^ gmul(d, 3) ^ e);
-        s[c * 4 + 2] = (uint8_t)(a ^ b ^ gmul(d, 2) ^ gmul(e, 3));
-        s[c * 4 + 3] = (uint8_t)(gmul(a, 3) ^ b ^ d ^ gmul(e, 2));
-    }
-}
-
-static void encrypt_block(const uint8_t* rk, const uint8_t* in, uint8_t* out) {
-    uint8_t st[16];
-    std::memcpy(st, in, 16);
-    add_round_key(st, rk);
-    for (int r = 1; r < 10; ++r) {
-        sub_bytes(st);
-        shift_rows(st);
-        mix_columns(st);
-        add_round_key(st, rk + r * 16);
-    }
-    sub_bytes(st);
-    shift_rows(st);
-    add_round_key(st, rk + 10 * 16);
-    std::memcpy(out, st, 16);
-}
-
-static std::vector<uint8_t> cbc_encrypt(const uint8_t* key,
-                                        const uint8_t* iv,
-                                        const std::vector<uint8_t>& pt) {
-    uint8_t rk[176];
-    key_expansion(key, rk);
-
-    size_t pad = 16 - (pt.size() % 16);
-    std::vector<uint8_t> padded = pt;
-    padded.insert(padded.end(), pad, (uint8_t)pad);
-
-    std::vector<uint8_t> out(padded.size());
-    uint8_t prev[16];
-    std::memcpy(prev, iv, 16);
-
-    for (size_t i = 0; i < padded.size(); i += 16) {
-        uint8_t block[16];
-        for (int j = 0; j < 16; ++j) block[j] = padded[i + j] ^ prev[j];
-        encrypt_block(rk, block, out.data() + i);
-        std::memcpy(prev, out.data() + i, 16);
-    }
-    return out;
-}
-
-} 
+// AES-CBC, PKCS7 padding, random bytes, and Base64 are provided by Windows APIs.
 static std::string base64_encode(const std::vector<uint8_t>& data) {
-    static const char* tbl =
-        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    std::string out;
-    out.reserve(((data.size() + 2) / 3) * 4);
-    size_t i = 0;
-    for (; i + 2 < data.size(); i += 3) {
-        unsigned int n = (data[i] << 16) | (data[i + 1] << 8) | data[i + 2];
-        out.push_back(tbl[(n >> 18) & 63]);
-        out.push_back(tbl[(n >> 12) & 63]);
-        out.push_back(tbl[(n >> 6) & 63]);
-        out.push_back(tbl[n & 63]);
-    }
-    if (i < data.size()) {
-        unsigned int n = data[i] << 16;
-        bool two = (i + 1 < data.size());
-        if (two) n |= data[i + 1] << 8;
-        out.push_back(tbl[(n >> 18) & 63]);
-        out.push_back(tbl[(n >> 12) & 63]);
-        out.push_back(two ? tbl[(n >> 6) & 63] : '=');
-        out.push_back('=');
-    }
+#ifdef _WIN32
+    DWORD size = 0;
+    if (!CryptBinaryToStringA(data.data(), static_cast<DWORD>(data.size()),
+                              CRYPT_STRING_BASE64 | CRYPT_STRING_NOCRLF,
+                              nullptr, &size)) return {};
+    std::string out(size, '\0');
+    if (!CryptBinaryToStringA(data.data(), static_cast<DWORD>(data.size()),
+                              CRYPT_STRING_BASE64 | CRYPT_STRING_NOCRLF,
+                              out.data(), &size)) return {};
+    out.resize(size);
+    if (!out.empty() && out.back() == '\0') out.pop_back();
     return out;
+#else
+    if (data.empty()) return {};
+    std::string out(4 * ((data.size() + 2) / 3), '\0');
+    const auto size = EVP_EncodeBlock(
+        reinterpret_cast<unsigned char*>(out.data()), data.data(),
+        static_cast<int>(data.size()));
+    if (size < 0) return {};
+    out.resize(static_cast<size_t>(size));
+    return out;
+#endif
 }
 
 static std::string random_string(size_t len) {
@@ -218,15 +118,6 @@ static std::string random_string(size_t len) {
     s.reserve(len);
     for (size_t i = 0; i < len; ++i) s.push_back(chars[dis(gen)]);
     return s;
-}
-static void secure_random(uint8_t* buf, size_t n) {
-    static thread_local std::mt19937_64 gen(
-        ((uint64_t)std::random_device{}() << 32)
-        ^ (uint64_t)std::random_device{}()
-        ^ (uint64_t)std::chrono::high_resolution_clock::now()
-              .time_since_epoch().count());
-    std::uniform_int_distribution<int> dis(0, 255);
-    for (size_t i = 0; i < n; ++i) buf[i] = (uint8_t)dis(gen);
 }
 static std::string make_x_sign(const std::string& client = "web") {
     std::string echo = random_string(16);
@@ -242,9 +133,44 @@ static std::string make_x_sign(const std::string& client = "web") {
     std::vector<uint8_t> pt(pt_str.begin(), pt_str.end());
 
     uint8_t iv[16];
-    secure_random(iv, 16);
+#ifdef _WIN32
+    if (BCryptGenRandom(nullptr, iv, sizeof(iv), BCRYPT_USE_SYSTEM_PREFERRED_RNG) != 0)
+        return {};
 
-    auto ct = aes::cbc_encrypt(PSK, iv, pt);
+    BCRYPT_ALG_HANDLE alg = nullptr;
+    BCRYPT_KEY_HANDLE key = nullptr;
+    DWORD object_size = 0;
+    DWORD result_size = 0;
+    if (BCryptOpenAlgorithmProvider(&alg, BCRYPT_AES_ALGORITHM, nullptr, 0) != 0
+        || BCryptSetProperty(alg, BCRYPT_CHAINING_MODE,
+                             reinterpret_cast<PUCHAR>(const_cast<wchar_t*>(BCRYPT_CHAIN_MODE_CBC)),
+                             sizeof(BCRYPT_CHAIN_MODE_CBC), 0) != 0
+        || BCryptGetProperty(alg, BCRYPT_OBJECT_LENGTH,
+                             reinterpret_cast<PUCHAR>(&object_size), sizeof(object_size),
+                             &result_size, 0) != 0) {
+        if (alg) BCryptCloseAlgorithmProvider(alg, 0);
+        return {};
+    }
+    std::vector<uint8_t> key_object(object_size);
+    if (BCryptGenerateSymmetricKey(alg, &key, key_object.data(), object_size,
+                                   const_cast<PUCHAR>(PSK), sizeof(PSK), 0) != 0) {
+        BCryptCloseAlgorithmProvider(alg, 0);
+        return {};
+    }
+    std::vector<uint8_t> encryption_iv(iv, iv + sizeof(iv));
+    std::vector<uint8_t> ct(pt.size() + 16);
+    ULONG ct_size = 0;
+    if (BCryptEncrypt(key, pt.data(), static_cast<ULONG>(pt.size()), nullptr,
+                      encryption_iv.data(), static_cast<ULONG>(encryption_iv.size()),
+                      ct.data(), static_cast<ULONG>(ct.size()),
+                      &ct_size, BCRYPT_BLOCK_PADDING) != 0) {
+        BCryptDestroyKey(key);
+        BCryptCloseAlgorithmProvider(alg, 0);
+        return {};
+    }
+    ct.resize(ct_size);
+    BCryptDestroyKey(key);
+    BCryptCloseAlgorithmProvider(alg, 0);
 
     std::vector<uint8_t> combined;
     combined.reserve(16 + ct.size());
@@ -252,133 +178,29 @@ static std::string make_x_sign(const std::string& client = "web") {
     combined.insert(combined.end(), ct.begin(), ct.end());
 
     return base64_encode(combined);
+#else
+    if (RAND_bytes(iv, sizeof(iv)) != 1) return {};
+    EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
+    if (!ctx) return {};
+    std::vector<uint8_t> ct(pt.size() + EVP_MAX_BLOCK_LENGTH);
+    int written = 0;
+    int final_written = 0;
+    const bool ok = EVP_EncryptInit_ex(ctx, EVP_aes_128_cbc(), nullptr, PSK, iv) == 1
+        && EVP_EncryptUpdate(ctx, ct.data(), &written, pt.data(), static_cast<int>(pt.size())) == 1
+        && EVP_EncryptFinal_ex(ctx, ct.data() + written, &final_written) == 1;
+    EVP_CIPHER_CTX_free(ctx);
+    if (!ok) return {};
+    ct.resize(static_cast<size_t>(written + final_written));
+    std::vector<uint8_t> combined;
+    combined.reserve(sizeof(iv) + ct.size());
+    combined.insert(combined.end(), iv, iv + sizeof(iv));
+    combined.insert(combined.end(), ct.begin(), ct.end());
+    return base64_encode(combined);
+#endif
 }
 
-struct HttpResponse {
-    long        status = 0;
-    std::string body;
-};
-
-static std::wstring s2w(const std::string& s) {
-    if (s.empty()) return L"";
-    int n = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), (int)s.size(), nullptr, 0);
-    std::wstring w(n, L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, s.c_str(), (int)s.size(), &w[0], n);
-    return w;
-}
-
-struct ParsedUrl {
-    std::wstring host;
-    std::wstring path;
-    INTERNET_PORT port = 0;
-    bool https = false;
-    bool ok = false;
-};
-
-static ParsedUrl parse_url(const std::string& url) {
-    ParsedUrl r;
-    std::wstring wurl = s2w(url);
-
-    URL_COMPONENTS uc{};
-    uc.dwStructSize = sizeof(uc);
-    wchar_t host[256] = {0};
-    wchar_t path[2048] = {0};
-    uc.lpszHostName = host;
-    uc.dwHostNameLength = 256;
-    uc.lpszUrlPath = path;
-    uc.dwUrlPathLength = 2048;
-
-    if (!WinHttpCrackUrl(wurl.c_str(), (DWORD)wurl.size(), 0, &uc))
-        return r;
-
-    r.host  = std::wstring(host, uc.dwHostNameLength);
-    r.path  = std::wstring(path, uc.dwUrlPathLength);
-    r.port  = uc.nPort;
-    r.https = (uc.nScheme == INTERNET_SCHEME_HTTPS);
-    r.ok    = true;
-    return r;
-}
-
-class Session {
-public:
-    HttpResponse post(const std::string& url,
-                      const std::vector<std::string>& headers,
-                      const std::string& body,
-                      long timeout_sec = 10)
-    {
-        HttpResponse resp;
-        auto u = parse_url(url);
-        if (!u.ok) { resp.status = -1; resp.body = "invalid url"; return resp; }
-
-        HINTERNET hSession = WinHttpOpen(
-            L"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-            L"(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-            WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
-            WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
-        if (!hSession) { resp.status = -1; resp.body = "WinHttpOpen fail"; return resp; }
-
-        DWORD to = (DWORD)(timeout_sec * 1000);
-        WinHttpSetTimeouts(hSession, to, to, to, to);
-
-        HINTERNET hConnect = WinHttpConnect(hSession, u.host.c_str(), u.port, 0);
-        if (!hConnect) {
-            WinHttpCloseHandle(hSession);
-            resp.status = -1; resp.body = "WinHttpConnect fail";
-            return resp;
-        }
-
-        HINTERNET hRequest = WinHttpOpenRequest(
-            hConnect, L"POST", u.path.c_str(),
-            nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
-            u.https ? WINHTTP_FLAG_SECURE : 0);
-        if (!hRequest) {
-            WinHttpCloseHandle(hConnect);
-            WinHttpCloseHandle(hSession);
-            resp.status = -1; resp.body = "WinHttpOpenRequest fail";
-            return resp;
-        }
-
-        std::string hdrs;
-        for (auto& h : headers) { hdrs += h; hdrs += "\r\n"; }
-        std::wstring whdrs = s2w(hdrs);
-
-        BOOL ok = WinHttpSendRequest(
-            hRequest,
-            whdrs.empty() ? WINHTTP_NO_ADDITIONAL_HEADERS : whdrs.c_str(),
-            whdrs.empty() ? 0 : (DWORD)-1L,
-            (LPVOID)body.data(), (DWORD)body.size(),
-            (DWORD)body.size(), 0);
-
-        if (ok) ok = WinHttpReceiveResponse(hRequest, nullptr);
-
-        if (!ok) {
-            DWORD e = GetLastError();
-            resp.status = -1;
-            resp.body   = "http error " + std::to_string(e);
-        } else {
-            DWORD code = 0, sz = sizeof(code);
-            WinHttpQueryHeaders(
-                hRequest,
-                WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
-                WINHTTP_HEADER_NAME_BY_INDEX, &code, &sz,
-                WINHTTP_NO_HEADER_INDEX);
-            resp.status = (long)code;
-
-            DWORD avail = 0;
-            while (WinHttpQueryDataAvailable(hRequest, &avail) && avail > 0) {
-                std::vector<char> buf(avail);
-                DWORD read = 0;
-                if (!WinHttpReadData(hRequest, buf.data(), avail, &read)) break;
-                resp.body.append(buf.data(), read);
-            }
-        }
-
-        WinHttpCloseHandle(hRequest);
-        WinHttpCloseHandle(hConnect);
-        WinHttpCloseHandle(hSession);
-        return resp;
-    }
-};
+using HttpResponse = pu::HttpResponse;
+using Session = pu::HttpSession;
 
 static const std::string UA =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -404,8 +226,298 @@ static std::vector<std::string> auth_headers(const std::string& token) {
     return h;
 }
 
+struct Config {
+    std::string username;
+    std::string password;
+    long long school_id = 0;
+    std::string college;
+    std::vector<std::string> excluded_credits;
+    int advance_ms = 150;
+    int service_refresh_minutes = 28;
+    std::string service_rest_time;
+    bool service = false;
+    std::string ntfy_server;
+    std::string ntfy_topic;
+    std::string ntfy_username;
+    std::string ntfy_password;
+};
+
+static bool parse_clock_minutes(const std::string& value, int& minutes) {
+    const auto separator = value.find(':');
+    if (separator == std::string::npos || separator == 0 || separator + 1 >= value.size())
+        return false;
+    try {
+        size_t hour_length = 0;
+        size_t minute_length = 0;
+        const int hour = std::stoi(value.substr(0, separator), &hour_length);
+        const int minute = std::stoi(value.substr(separator + 1), &minute_length);
+        if (hour_length != separator || minute_length != value.size() - separator - 1 ||
+            hour < 0 || hour > 23 || minute < 0 || minute > 59)
+            return false;
+        minutes = hour * 60 + minute;
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+static bool is_service_rest_time(const Config& cfg) {
+    if (cfg.service_rest_time.empty()) return false;
+    const auto separator = cfg.service_rest_time.find('-');
+    if (separator == std::string::npos) {
+        LOG_WARN("service_rest_time 格式无效, 应为 HH:MM-HH:MM: ", cfg.service_rest_time);
+        return false;
+    }
+    int start = 0;
+    int end = 0;
+    if (!parse_clock_minutes(cfg.service_rest_time.substr(0, separator), start) ||
+        !parse_clock_minutes(cfg.service_rest_time.substr(separator + 1), end)) {
+        LOG_WARN("service_rest_time 格式无效, 应为 HH:MM-HH:MM: ", cfg.service_rest_time);
+        return false;
+    }
+    auto now = system_clock::to_time_t(system_clock::now());
+    std::tm local{};
+#ifdef _WIN32
+    localtime_s(&local, &now);
+#else
+    localtime_r(&now, &local);
+#endif
+    const int current = local.tm_hour * 60 + local.tm_min;
+    if (start == end) return false;
+    if (start < end) return current >= start && current < end;
+    return current >= start || current < end;
+}
+
+static std::string ntfy_url(const Config& cfg) {
+    if (cfg.ntfy_server.empty() || cfg.ntfy_topic.empty()) return {};
+    auto server = cfg.ntfy_server;
+    while (!server.empty() && server.back() == '/') server.pop_back();
+    return server + "/" + cfg.ntfy_topic;
+}
+
+static std::string url_encode(const std::string& value) {
+    static const char hex[] = "0123456789ABCDEF";
+    std::string encoded;
+    for (const unsigned char character : value) {
+        if ((character >= 'A' && character <= 'Z') ||
+            (character >= 'a' && character <= 'z') ||
+            (character >= '0' && character <= '9') ||
+            character == '-' || character == '_' || character == '.' || character == '~') {
+            encoded.push_back(static_cast<char>(character));
+        } else {
+            encoded.push_back('%');
+            encoded.push_back(hex[character >> 4]);
+            encoded.push_back(hex[character & 0x0F]);
+        }
+    }
+    return encoded;
+}
+
+static void notify_ntfy(Session& session, const Config& cfg,
+                        const std::string& title, const std::string& message) {
+    const auto base_url = ntfy_url(cfg);
+    if (base_url.empty()) {
+        LOG_WARN("未发送 ntfy 通知: 未配置 ntfy_server 和 ntfy_topic");
+        return;
+    }
+    const auto url = base_url + "?title=" + url_encode(title) + "&priority=3";//你可以改 我就用默认3了
+    auto headers = base_headers();
+    if (!cfg.ntfy_username.empty()) {
+        const auto credentials = cfg.ntfy_username + ":" + cfg.ntfy_password;
+        headers.push_back("Authorization: Basic " + base64_encode(
+            std::vector<uint8_t>(credentials.begin(), credentials.end())));
+    }
+    LOG_INFO("发送 ntfy 通知");
+    const auto response = session.post(url, headers, message, 10);
+    if (response.status < 200 || response.status >= 300)
+        LOG_WARN("ntfy 通知失败, status=", response.status, " body=", response.body);
+    else
+        LOG_INFO("ntfy 通知发送成功, status=", response.status);
+}
+
+static bool is_joined_cached_unlocked(const std::string& activity_id) {
+    std::ifstream in("joined_activities.json");
+    if (!in) {
+        LOG_INFO("未找到本地报名记录: joined_activities.json");
+        return false;
+    }
+    try {
+        json cache;
+        in >> cache;
+        const bool joined = cache.contains(activity_id);
+        LOG_INFO(joined ? "本地报名记录命中: " : "本地报名记录未命中: ", activity_id);
+        return joined;
+    } catch (...) {
+        LOG_WARN("读取本地报名记录失败, 按未报名处理: joined_activities.json");
+        return false;
+    }
+}
+
+static bool is_joined_cached(const std::string& activity_id) {
+    std::lock_guard<std::mutex> lock(g_joined_mtx);
+    return is_joined_cached_unlocked(activity_id);
+}
+
+static void mark_joined(const std::string& activity_id, const std::string& result) {
+    std::lock_guard<std::mutex> lock(g_joined_mtx);
+    json cache = json::object();
+    std::ifstream in("joined_activities.json");
+    try { if (in) in >> cache; } catch (...) { cache = json::object(); }
+    cache[activity_id] = json{{"result", result}, {"saved_at", std::time(nullptr)}};
+    std::ofstream out("joined_activities.json", std::ios::trunc);
+    if (!out) {
+        LOG_ERR("无法写入本地报名记录: joined_activities.json");
+        return;
+    }
+    out << cache.dump(2);
+    if (!out) {
+        LOG_ERR("写入本地报名记录失败: joined_activities.json");
+        return;
+    }
+    try {
+        LOG_INFO("本地报名记录已写入: ",
+                 (std::filesystem::current_path() / "joined_activities.json").string());
+    } catch (...) {
+        LOG_INFO("本地报名记录已写入: joined_activities.json");
+    }
+}
+
+struct CourseEntry {
+    int day = 0;
+    int start_minute = 0;
+    int end_minute = 0;
+    std::vector<int> weeks;
+};
+
+struct CourseSchedule {
+    std::time_t semester_start = 0;
+    std::vector<CourseEntry> courses;
+    bool valid = false;
+};
+
+static std::time_t add_days(std::time_t value, int days);
+static CourseSchedule load_course_schedule(bool enabled);
+
+static std::string login(Session& session);
+
+static Config load_config() {
+    Config cfg;
+    std::ifstream in("config.json");
+    if (!in) {
+#ifdef _WIN32
+        char cwd[MAX_PATH] = {};
+        GetCurrentDirectoryA(sizeof(cwd), cwd);
+        LOG_ERR("找不到 config.json, 当前工作目录: ", cwd);
+#else
+        char cwd[4096] = {};
+        if (getcwd(cwd, sizeof(cwd)))
+            LOG_ERR("找不到 config.json, 当前工作目录: ", cwd);
+        else
+            LOG_ERR("找不到 config.json");
+#endif
+        return cfg;
+    }
+    try {
+        json j = json::parse(in);
+        cfg.username = j.value("username", "");
+        cfg.password = j.value("password", "");
+        cfg.school_id = j.value("sid", 0LL);
+        cfg.college = j.value("college", "");
+        cfg.advance_ms = j.value("advance_ms", 150);
+        cfg.service_refresh_minutes = j.value("service_refresh_minutes", 28);
+        cfg.service_rest_time = j.value("service_rest_time", "");
+        cfg.service = j.value("service", false);
+        cfg.ntfy_server = j.value("ntfy_server", "");
+        cfg.ntfy_topic = j.value("ntfy_topic", "");
+        cfg.ntfy_username = j.value("ntfy_username", "");
+        cfg.ntfy_password = j.value("ntfy_password", "");
+        std::string excluded = j.value("excluded_credits", "");
+        std::stringstream ss(excluded);
+        std::string item;
+        while (std::getline(ss, item, '|')) {
+            if (!item.empty() && (ss.peek() == '|')) ss.get();
+            if (!item.empty()) cfg.excluded_credits.push_back(item);
+        }
+    } catch (const std::exception& e) {
+        LOG_WARN("读取 config.json 失败: ", e.what());
+    }
+    if (cfg.username.empty() || cfg.password.empty() || cfg.school_id == 0)
+        LOG_WARN("配置不完整: username/password/sid 必须非空");
+    return cfg;
+}
+
+static bool contains_name(const std::vector<std::string>& names, const std::string& value) {
+    return std::find(names.begin(), names.end(), value) != names.end();
+}
+
+static bool is_joinable_status(const std::string& status) {
+    return status == "报名未开始" || status == "报名进行中";
+}
+
+static bool is_activity_full(const json& activity) {
+    const auto capacity = activity.value("allowUserCount", 0LL);
+    const auto joined = activity.value("joinUserCount", 0LL);
+    return capacity > 0 && joined >= capacity;
+}
+
+static std::time_t parse_saved_at(const json& value) {
+    try {
+        if (value.is_number_integer()) return value.get<std::time_t>();
+        if (value.is_string()) {
+            std::tm tm{};
+            std::istringstream input(value.get<std::string>());
+            input >> std::get_time(&tm, "%Y-%m-%dT%H:%M:%S");
+            if (!input.fail()) return std::mktime(&tm);
+        }
+    } catch (...) {}
+    return 0;
+}
+
+static std::string load_saved_token(const std::string& path) {
+    std::ifstream in(path);
+    if (!in) return {};
+    try {
+        json j = json::parse(in);
+        const auto token = j.value("token", "");
+        const auto saved = parse_saved_at(j.value("saved_at", json()));
+        const auto age = std::time(nullptr) - saved;
+        if (!token.empty() && saved > 0 && age >= 0 && age < 7 * 24 * 60 * 60)
+            return token;
+    } catch (...) {}
+    return {};
+}
+
+static std::string load_saved_token() {
+    const auto token = load_saved_token("session.json");
+    if (!token.empty()) {
+        LOG_INFO("发现本地登录状态: session.json");
+        return token;
+    }
+    return {};
+}
+
+static void save_token(const std::string& token) {
+    const char* path = "session.json";
+    std::ofstream out(path, std::ios::trunc);
+    out << json{{"token", token}, {"saved_at", std::time(nullptr)}}.dump(2);
+}
+
+static std::string get_token(Session& session, const Config& cfg) {
+    auto token = load_saved_token();
+    if (!token.empty()) {
+        LOG_INFO("复用本地登录状态");
+        return token;
+    }
+    USERNAME = cfg.username;
+    PASSWORD = cfg.password;
+    SCHOOL_ID = cfg.school_id;
+    token = login(session);
+    save_token(token);
+    return token;
+}
+
 static std::string login(Session& session) {
-    LOG_INFO("登录中: ", USERNAME);
+    LOG_INFO("登录中");
 
     json body;
     body["userName"] = USERNAME;
@@ -422,12 +534,16 @@ static std::string login(Session& session) {
     std::string token;
     try {
         auto j = json::parse(r.body);
+        LOG_INFO("登录接口返回 code=", j.value("code", -1),
+                 ", message=", j.value("message", ""));
         if (j.contains("data") && j["data"].contains("token"))
             token = j["data"]["token"].get<std::string>();
-    } catch (...) {}
+    } catch (const std::exception& e) {
+        LOG_ERR("登录响应不是有效 JSON: ", e.what(), " body=", r.body);
+    }
 
     if (token.empty()) {
-        LOG_ERR("登录失败: ", r.body);
+        LOG_ERR("登录失败, 服务端响应: ", r.body);
         std::exit(1);
     }
     LOG_OK("登录成功");
@@ -435,31 +551,236 @@ static std::string login(Session& session) {
 }
 
 struct ActivityInfo {
+    long long id = 0;
     std::string name;
     std::string joinStartTime;
+    std::string startTime;
+    std::string endTime;
+    std::string address;
+    std::string creditName;
+    double credit = 0;
+    std::string category;
+    bool eligible = false;
+    std::vector<std::string> allowed_colleges;
 };
+
+static std::string activity_notification_message(const ActivityInfo& activity) {
+    return "活动时间: " + activity.startTime + " - " + activity.endTime +
+           "\n活动地点: " + activity.address;
+}
 
 static ActivityInfo get_activity(Session& session,
                                  const std::string& token,
                                  const std::string& activity_id)
 {
-    json body;
-    body["id"] = std::stoll(activity_id);
-
-    auto r = session.post(INFO_URL, auth_headers(token), body.dump(), 10);
+    auto r = session.get(INFO_URL + activity_id, auth_headers(token), 10);
 
     ActivityInfo info;
     try {
         auto j = json::parse(r.body);
-        if (j.contains("data") && j["data"].contains("baseInfo")) {
-            auto& b = j["data"]["baseInfo"];
-            if (b.contains("name"))          info.name          = b["name"].get<std::string>();
-            if (b.contains("joinStartTime")) info.joinStartTime = b["joinStartTime"].get<std::string>();
+        if (j.contains("data")) {
+            auto& b = j["data"];
+            info.id = b.value("id", std::stoll(activity_id));
+            info.name = b.value("name", "");
+            info.joinStartTime = b.value("joinStartTime", "");
+            info.startTime = b.value("startTime", "");
+            info.endTime = b.value("endTime", "");
+            info.address = b.value("address", "");
+            info.credit = b.value("credit", 0.0);
+            info.category = b.value("category", json::object()).value("name", "");
+            info.creditName = info.category;
+            for (const auto& college : b.value("allowCollege", json::array()))
+                info.allowed_colleges.push_back(college.value("name", ""));
         }
     } catch (const std::exception& e) {
         LOG_ERR("解析活动信息失败: ", e.what(), " 原文=", r.body);
     }
     return info;
+}
+
+static system_clock::time_point parse_dt(const std::string& s);
+
+static bool overlaps_course(const ActivityInfo& activity, const CourseSchedule& schedule) {
+    if (!schedule.valid || activity.startTime.empty() || activity.endTime.empty()) return false;
+    const auto activity_start = parse_dt(activity.startTime);
+    const auto activity_end = parse_dt(activity.endTime);
+    if (activity_start == system_clock::time_point{} || activity_end <= activity_start) return false;
+    const auto activity_start_time = system_clock::to_time_t(activity_start);
+    const auto activity_end_time = system_clock::to_time_t(activity_end);
+
+    std::tm activity_day{};
+#ifdef _WIN32
+    localtime_s(&activity_day, &activity_start_time);
+#else
+    localtime_r(&activity_start_time, &activity_day);
+#endif
+    const auto days_since_semester = static_cast<int>(
+        std::difftime(activity_start_time, schedule.semester_start) / (24 * 60 * 60));
+    if (days_since_semester < 0) return false;
+    const int week = days_since_semester / 7 + 1;
+    const int day = activity_day.tm_wday == 0 ? 7 : activity_day.tm_wday;
+    for (const auto& course : schedule.courses) {
+        if (course.day != day) continue;
+        if (std::find(course.weeks.begin(), course.weeks.end(), week) == course.weeks.end())
+            continue;
+        const auto course_day = add_days(schedule.semester_start, (week - 1) * 7 + day - 1);
+        const auto course_start = course_day + course.start_minute * 60;
+        const auto course_end = course_day + course.end_minute * 60;
+        if (activity_start_time < course_end && course_start < activity_end_time)
+            return true;
+    }
+    return false;
+}
+
+static void cache_activity(const ActivityInfo& info) {
+    json cache = json::object();
+    std::ifstream in("activity_cache.json");
+    try { if (in) in >> cache; } catch (...) { cache = json::object(); }
+    cache[std::to_string(info.id)] = {
+        {"id", info.id}, {"name", info.name}, {"joinStartTime", info.joinStartTime},
+        {"startTime", info.startTime}, {"endTime", info.endTime}, {"address", info.address},
+        {"creditName", info.creditName}, {"credit", info.credit}, {"category", info.category},
+        {"allowed_colleges", info.allowed_colleges}
+    };
+    std::ofstream out("activity_cache.json", std::ios::trunc);
+    if (!out) {
+        LOG_ERR("无法写入活动详情缓存: activity_cache.json");
+        return;
+    }
+    out << cache.dump(2);
+    if (!out) {
+        LOG_ERR("写入活动详情缓存失败: activity_cache.json");
+        return;
+    }
+    try {
+        LOG_INFO("活动详情缓存已写入: ",
+                 (std::filesystem::current_path() / "activity_cache.json").string());
+    } catch (...) {
+        LOG_INFO("活动详情缓存已写入: activity_cache.json");
+    }
+}
+
+static bool load_cached_activity(const std::string& id, ActivityInfo& info) {
+    std::ifstream in("activity_cache.json");
+    if (!in) {
+        LOG_INFO("未找到活动详情缓存: activity_cache.json");
+        return false;
+    }
+    try {
+        json cache; in >> cache;
+        if (!cache.contains(id)) {
+            LOG_INFO("活动详情缓存未命中: ", id);
+            return false;
+        }
+        auto& b = cache[id];
+        info.id = b.value("id", std::stoll(id));
+        info.name = b.value("name", "");
+        info.joinStartTime = b.value("joinStartTime", "");
+        info.startTime = b.value("startTime", "");
+        info.endTime = b.value("endTime", "");
+        info.address = b.value("address", "");
+        info.creditName = b.value("creditName", "");
+        info.credit = b.value("credit", 0.0);
+        info.category = b.value("category", "");
+        for (const auto& college : b.value("allowed_colleges", json::array()))
+            info.allowed_colleges.push_back(college.get<std::string>());
+        LOG_INFO("活动详情缓存命中: ", id);
+        return true;
+    } catch (const std::exception& e) {
+        LOG_WARN("读取活动详情缓存失败, 按未命中处理: ", e.what());
+        return false;
+    }
+}
+
+static std::vector<ActivityInfo> list_possible_activities(Session& session,
+                                                            const std::string& token,
+                                                            const Config& cfg,
+                                                            const CourseSchedule& schedule,
+                                                            bool* auth_failed = nullptr) {
+    if (auth_failed) *auth_failed = false;
+    std::vector<ActivityInfo> result;
+    std::vector<std::string> activity_ids;
+    int page = 1;
+    int total_pages = 1;
+    while (true) {
+        json body{{"sort", 1}, {"page", page}, {"limit", LIST_PAGE_SIZE},
+                  {"puType", 0}, {"isAudit", {0}}};
+        auto r = session.post(LIST_URL, auth_headers(token), body.dump(), 10);
+        json j;
+        try { j = json::parse(r.body); } catch (...) { LOG_ERR("活动列表解析失败: ", r.body); break; }
+        const auto response_code = j.value("code", 0LL);
+        if (r.status == 401 || r.status == 403 || response_code == 401 || response_code == 403) {
+            if (auth_failed) *auth_failed = true;
+            LOG_WARN("登录状态已失效, 将重新登录");
+            break;
+        }
+        if (response_code != 0) {
+            LOG_ERR("活动列表请求失败: code=", response_code,
+                    ", message=", j.value("message", ""));
+            break;
+        }
+        auto list = j.value("data", json::object()).value("list", json::array());
+        if (list.empty()) break;
+        auto page_info = j.value("data", json::object()).value("pageInfo", json::object());
+        total_pages = std::max(1, page_info.value("total", page));
+        LOG_INFO("扫描活动列表: 第 ", page, "/", total_pages, " 页");
+        for (const auto& item : list) {
+            if (!is_joinable_status(item.value("startTimeValue", ""))) continue;
+            if (is_activity_full(item)) continue;
+            activity_ids.push_back(std::to_string(item.value("id", 0LL)));
+        }
+        if (page >= total_pages) break;
+        ++page;
+        std::this_thread::sleep_for(milliseconds(LIST_PAGE_DELAY_MS));
+    }
+
+    const size_t total_details = activity_ids.size();
+    LOG_INFO("共发现 ", total_details, " 个可报名活动, 开始获取详情");
+    for (size_t index = 0; index < total_details; ++index) {
+        const auto& id = activity_ids[index];
+        ActivityInfo info;
+        bool cached = load_cached_activity(id, info);
+        if (!cached) {
+            info = get_activity(session, token, id);
+            if (info.id != 0) cache_activity(info);
+        }
+        bool category_ok = !contains_name(cfg.excluded_credits, info.category);
+        bool college_ok = !cfg.college.empty() &&
+            contains_name(info.allowed_colleges, cfg.college);
+        const bool schedule_ok = !overlaps_course(info, schedule);
+        info.eligible = category_ok && college_ok && schedule_ok;
+        LOG_INFO("详情进度 [", index + 1, "/", total_details, "]",
+                 cached ? " 使用缓存" : " 已请求",
+                 info.eligible ? ",符合筛选条件" : ",已过滤");
+        if (info.eligible) result.push_back(info);
+        if (!cached && index + 1 < total_details)
+            std::this_thread::sleep_for(milliseconds(DETAIL_REQUEST_DELAY_MS));
+    }
+    return result;
+}
+
+static void print_possible_activities(Session& session, const std::string& token,
+                                      const Config& cfg,
+                                      const CourseSchedule& schedule) {
+    auto activities = list_possible_activities(session, token, cfg, schedule);
+    if (activities.empty()) { LOG_INFO("没有符合条件的可报名活动"); return; }
+    for (const auto& a : activities) {
+        LOG_INFO("活动: ", a.name, " | 时间: ", a.startTime, " - ", a.endTime,
+                 " | 地点: ", a.address, " | 学时: ", a.creditName, " ", a.credit);
+    }
+}
+
+static void check_version(Session& session, bool bypass) {
+    if (bypass) return;
+    auto r = session.get(VERSION_URL + random_string(12), base_headers(), 5);
+    try {
+        auto remote = json::parse(r.body).value("version", "");
+        if (!remote.empty() && remote != PROGRAM_VERSION)
+            LOG_WARN("远程版本为 ", remote, ", 当前版本为 ", PROGRAM_VERSION,
+                     ": API 可能改变, 程序可能失效!!");
+    } catch (...) {
+        LOG_WARN("版本检查失败, 继续执行");
+    }
 }
 
 static system_clock::time_point parse_dt(const std::string& s) {
@@ -486,10 +807,12 @@ static void wait_until(system_clock::time_point target, int advance_ms) {
     }
 }
 
-static bool fire(Session& session,
-                 const std::string& token,
-                 const std::string& activity_id,
-                 double duration = 15.0)
+enum class SignupResult { success, already_joined, failed };
+
+static SignupResult fire(Session& session,
+                         const std::string& token,
+                         const std::string& activity_id,
+                         double duration = 15.0)
 {
     auto deadline = system_clock::now()
                   + milliseconds((long long)(duration * 1000));
@@ -510,69 +833,297 @@ static bool fire(Session& session,
         LOG_DBG("[", attempt, "] ",
                 text.substr(0, std::min<size_t>(200, text.size())));
 
-        if (text.find("报名成功") != std::string::npos) {
-            LOG_OK("报名成功! (第 ", attempt, " 次)");
-            return true;
-        }
-        if (text.find("您已报名") != std::string::npos) {
-            LOG_OK("已报名过 (第 ", attempt, " 次)");
-            return true;
-        }
         try {
             auto j = json::parse(text);
-            if (j.contains("code")) {
-                long long code = j["code"].get<long long>();
-                if (code == 0) {
-                    LOG_OK("报名成功! (第 ", attempt, " 次) ",
-                           text.substr(0, std::min<size_t>(200, text.size())));
-                    return true;
-                }
-                if (code == 9405) {
-                    LOG_OK("已报名过 (第 ", attempt, " 次)");
-                    return true;
-                }
+            const auto code = j.value("code", -1LL);
+            const auto message = j.value("message", "");
+            const auto data = j.value("data", json::object());
+            const auto detail = data.value("msg", "");
+            if (code == 0 && detail.find("报名成功") != std::string::npos) {
+                LOG_OK("报名成功! (第 ", attempt, " 次): ", detail);
+                return SignupResult::success;
             }
+            if (code == 9405 && (message.find("已报名") != std::string::npos ||
+                                 detail.find("已报名") != std::string::npos)) {
+                LOG_OK("活动已报名, 停止重试");
+                return SignupResult::already_joined;
+            }
+            if (code == 500 || code == 9405) {
+                LOG_ERR("报名终止: code=", code, ", message=", message);
+                return SignupResult::failed;
+            }
+            LOG_DBG("[", attempt, "] 报名未成功: code=", code,
+                    ", message=", message, ", detail=", detail);
         } catch (...) {}
 
         std::this_thread::sleep_for(milliseconds(80));
     }
 
     LOG_ERR("报名失败, 共尝试 ", attempt, " 次");
-    return false;
+    return SignupResult::failed;
 }
 
-// ==================== usage ====================
+static void signup_and_notify(Session& session, const std::string& token,
+                              const Config& cfg, const ActivityInfo& activity) {
+    const auto id = std::to_string(activity.id);
+    LOG_INFO("报名任务开始: ", activity.name, " (", id, ")");
+    {
+        std::lock_guard<std::mutex> lock(g_joined_mtx);
+        if (is_joined_cached_unlocked(id)) {
+            g_pending_activities.erase(id);
+            LOG_INFO("跳过已处理活动: ", activity.name, " (", id, ")");
+            return;
+        }
+    }
+
+    auto result = fire(session, token, id);
+    {
+        std::lock_guard<std::mutex> lock(g_joined_mtx);
+        g_pending_activities.erase(id);
+    }
+
+    std::string result_text;
+    std::string title_suffix;
+    if (result == SignupResult::success) {
+        result_text = "报名成功";
+        title_suffix = "报名成功";
+        mark_joined(id, "success");
+    } else if (result == SignupResult::already_joined) {
+        result_text = "已报名, 已加入本地记录";
+        title_suffix = "已报名";
+        mark_joined(id, "already_joined");
+    } else {
+        result_text = "报名失败或服务端拒绝";
+        title_suffix = "报名失败";
+    }
+    LOG_INFO("报名任务结束: ", activity.name, " (", id, ") -> ", result_text);
+    const auto message = activity_notification_message(activity);
+    const auto title = activity.name + title_suffix + "! ";
+    notify_ntfy(session, cfg, title, message);
+}
+
+struct ServiceTokenState {
+    std::mutex mutex;
+};
+
+static std::string ensure_service_token(Session& session, const Config& cfg,
+                                        ServiceTokenState& state) {
+    std::lock_guard<std::mutex> lock(state.mutex);
+    auto token = load_saved_token();
+    if (!token.empty()) return token;
+
+    USERNAME = cfg.username;
+    PASSWORD = cfg.password;
+    SCHOOL_ID = cfg.school_id;
+    token = login(session);
+    save_token(token);
+    return token;
+}
+
+static std::string refresh_service_token(Session& session, const Config& cfg,
+                                         ServiceTokenState& state) {
+    std::lock_guard<std::mutex> lock(state.mutex);
+    USERNAME = cfg.username;
+    PASSWORD = cfg.password;
+    SCHOOL_ID = cfg.school_id;
+    const auto token = login(session);
+    save_token(token);
+    return token;
+}
+
+static void run_service(Session& session, Config cfg, bool ignore_version,
+                        bool course_filter) {
+    check_version(session, ignore_version);
+    auto token_state = std::make_shared<ServiceTokenState>();
+    std::string token = ensure_service_token(session, cfg, *token_state);
+    int round = 0;
+    while (true) {
+        ++round;
+        cfg = load_config();
+        USERNAME = cfg.username;
+        PASSWORD = cfg.password;
+        SCHOOL_ID = cfg.school_id;
+        ADVANCE_MS = cfg.advance_ms;
+        if (cfg.username.empty() || cfg.password.empty() || cfg.school_id == 0) {
+            LOG_ERR("服务刷新跳过: config.json 的 username/password/sid 不完整");
+        } else if (is_service_rest_time(cfg)) {
+            LOG_INFO("当前处于休息时段 ", cfg.service_rest_time, ", 跳过活动列表请求");
+        } else {
+            token = ensure_service_token(session, cfg, *token_state);
+            LOG_INFO("服务模式第 ", round, " 轮开始扫描");
+            bool auth_failed = false;
+            const auto schedule = load_course_schedule(course_filter);
+            auto activities = list_possible_activities(session, token, cfg, schedule, &auth_failed);
+            if (auth_failed) {
+                LOG_WARN("活动列表认证失败, 重新登录后重试本轮");
+                token = refresh_service_token(session, cfg, *token_state);
+                activities = list_possible_activities(session, token, cfg, schedule);
+            }
+            std::stable_sort(activities.begin(), activities.end(),
+                [](const ActivityInfo& left, const ActivityInfo& right) {
+                    if (left.joinStartTime != right.joinStartTime)
+                        return left.joinStartTime < right.joinStartTime;
+                    return left.credit > right.credit;
+                });
+            LOG_INFO("本轮发现 ", activities.size(), " 个可报名活动");
+            for (size_t activity_index = 0; activity_index < activities.size(); ++activity_index) {
+                const auto& activity = activities[activity_index];
+                const auto activity_id = std::to_string(activity.id);
+                {
+                    std::lock_guard<std::mutex> lock(g_joined_mtx);
+                    if (is_joined_cached_unlocked(activity_id) ||
+                        !g_pending_activities.insert(activity_id).second) {
+                        LOG_INFO("跳过已处理或已有任务的活动: ", activity.name,
+                                 " (", activity.id, ")");
+                        continue;
+                    }
+                }
+                const auto start = parse_dt(activity.joinStartTime);
+                size_t same_start_rank = 0;
+                for (size_t previous = 0; previous < activity_index; ++previous) {
+                    if (activities[previous].joinStartTime == activity.joinStartTime)
+                        ++same_start_rank;
+                }
+                if (start != system_clock::time_point{} && start > system_clock::now()) {
+                    const auto task_start = start - minutes(5);
+                    const auto wait_ms = duration_cast<milliseconds>(
+                        task_start - system_clock::now()).count();
+                    LOG_OK("创建定时报名任务: ", activity.name, " (", activity.id,
+                             "), 提前 5 分钟启动, 等待 ", std::max<int64_t>(0, wait_ms),
+                             " ms, 报名序号 ", same_start_rank + 1);
+                    std::thread([&session, token_state, cfg, activity, start, wait_ms,
+                                 same_start_rank]() {
+                        if (wait_ms > 0) std::this_thread::sleep_for(milliseconds(wait_ms));
+                        ensure_service_token(session, cfg, *token_state);
+                        wait_until(start, 0);
+                        if (same_start_rank > 0)
+                            std::this_thread::sleep_for(seconds(static_cast<int>(same_start_rank)));
+                        const auto task_token = ensure_service_token(session, cfg, *token_state);
+                        signup_and_notify(session, task_token, cfg, activity);
+                    }).detach();
+                } else {
+                    LOG_OK("创建立即报名任务: ", activity.name, " (", activity.id,
+                             "), 报名序号 ", same_start_rank + 1);
+                    std::thread([&session, token_state, cfg, activity, same_start_rank]() {
+                        if (same_start_rank > 0)
+                            std::this_thread::sleep_for(seconds(static_cast<int>(same_start_rank)));
+                        const auto task_token = ensure_service_token(session, cfg, *token_state);
+                        signup_and_notify(session, task_token, cfg, activity);
+                    }).detach();
+                }
+            }
+        }
+        const int refresh_minutes = std::max(1, cfg.service_refresh_minutes);
+        LOG_INFO("服务模式将在 ", refresh_minutes,
+             " 分钟后重新读取配置并刷新报名表");
+        std::this_thread::sleep_for(minutes(refresh_minutes));
+    }
+}
+
 static void print_usage(const char* prog) {
-    std::cerr << "Usage: " << prog
-              << " <username> <password> <sid> <activity_id>\n"
-              << "示例: " << prog
-              << " 084026100 password(若含特殊字符请半角直引号包裹) 243205312479232(njucm的sid) 375177924706305(活动id)\n";
+    std::cerr << "Usage: " << prog << " --list [--no-course] [--ignore-version]\n"
+              << "       " << prog << " --signup <activity_id> [--force] [--ignore-version]\n"
+              << "       " << prog << " --service [--no-course] [--ignore-version]\n"
+              << "--list: 登录并列出符合条件的报名未开始活动\n"
+              << "--service: 无限运行! 每指定分钟刷新配置和报名表\n"
+              << "--no-course: 列表模式指定不使用课表筛选\n"
+              << "--signup <activity_id>: 报名指定活动\n"
+              << "--force: 忽略本地已报名记录并实际发送报名请求\n"
+              << "--ignore-version: 跳过版本检查(无用)\n";
 }
 
-// ==================== main ====================
 int main(int argc, char* argv[]) {
+#ifdef _WIN32
     SetConsoleOutputCP(CP_UTF8);
+#endif
 
-    if (argc != 5) {
+    bool list_mode = false;
+    bool service_mode = false;
+    bool ignore_version = false;
+    bool force_signup = false;
+    bool course_filter = true;
+    for (int i = 1; i < argc; ++i) {
+        const std::string arg = argv[i];
+        if (arg == "--list") list_mode = true;
+        else if (arg == "--service") service_mode = true;
+        else if (arg == "--force") force_signup = true;
+        else if (arg == "--course") course_filter = true;
+        else if (arg == "--no-course") course_filter = false;
+        else if (arg == "--signup") {
+            if (i + 1 >= argc || std::string(argv[i + 1]).compare(0, 2, "--") == 0) {
+                LOG_ERR("--signup 必须提供 activity_id");
+                print_usage(argv[0]);
+                return 2;
+            }
+            ACTIVITY_ID = argv[++i];
+            try {
+                if (std::stoll(ACTIVITY_ID) <= 0) throw std::invalid_argument("non-positive");
+            } catch (...) {
+                LOG_ERR("activity_id 错误: ", ACTIVITY_ID);
+                return 2;
+            }
+        }
+        else if (arg == "--ignore-version") ignore_version = true;
+        else if (arg == "--help" || arg == "-h") {
+            print_usage(argv[0]);
+            return 0;
+        } else {
+            LOG_ERR("未知参数: ", arg);
+            print_usage(argv[0]);
+            return 2;
+        }
+    }
+
+    Config cfg = load_config();
+    service_mode = service_mode || cfg.service;
+    if (cfg.username.empty() || cfg.password.empty() || cfg.school_id == 0) {
+        LOG_ERR("请在 config.json 填写 username、password、sid");
         print_usage(argv[0]);
         return 1;
     }
-
-    USERNAME    = argv[1];
-    PASSWORD    = argv[2];
-    try {
-        SCHOOL_ID = std::stoll(argv[3]);
-    } catch (...) {
-        LOG_ERR("SCHOOL_ID 不合理: ", argv[3]);
-        return 1;
+    if (list_mode && !ACTIVITY_ID.empty()) {
+        LOG_ERR("--list 不能与 --signup 同时使用");
+        return 2;
     }
-    ACTIVITY_ID = argv[4];
+    if (service_mode && (list_mode || !ACTIVITY_ID.empty())) {
+        LOG_ERR("--service 不能与 --list 或 --signup 同时使用");
+        return 2;
+    }
+    if (!list_mode && ACTIVITY_ID.empty()) {
+        if (service_mode) {
+            USERNAME = cfg.username;
+            PASSWORD = cfg.password;
+            SCHOOL_ID = cfg.school_id;
+            ADVANCE_MS = cfg.advance_ms;
+        } else {
+        LOG_ERR("请使用 --signup <activity_id> 报名, 或使用 --list");
+        return 1;
+        }
+    }
+
+    USERNAME = cfg.username;
+    PASSWORD = cfg.password;
+    SCHOOL_ID = cfg.school_id;
+    ADVANCE_MS = cfg.advance_ms;
 
     Session session;
+    if (service_mode) {
+        run_service(session, cfg, ignore_version, course_filter);
+        return 0;
+    }
+    check_version(session, ignore_version);
+    std::string token = get_token(session, cfg);
+    if (list_mode) {
+        const auto schedule = load_course_schedule(course_filter);
+        print_possible_activities(session, token, cfg, schedule);
+        return 0;
+    }
 
-    std::string token = login(session);
-
-    ActivityInfo info = get_activity(session, token, ACTIVITY_ID);
+    ActivityInfo info;
+    if (!load_cached_activity(ACTIVITY_ID, info)) {
+        info = get_activity(session, token, ACTIVITY_ID);
+        if (info.id != 0) cache_activity(info);
+    }
     if (info.joinStartTime.empty()) {
         LOG_ERR("未拿到 joinStartTime");
         return 1;
@@ -599,6 +1150,82 @@ int main(int argc, char* argv[]) {
         LOG_INFO("开始抢报名");
     }
 
-    fire(session, token, ACTIVITY_ID);
+    if (!force_signup && is_joined_cached(ACTIVITY_ID)) {
+        LOG_INFO("本地记录显示活动已报名, 跳过重复操作");
+        notify_ntfy(session, cfg, info.name + "已报名! ",
+                   activity_notification_message(info));
+        return 0;
+    }
+    const auto result = fire(session, token, ACTIVITY_ID);
+    if (result == SignupResult::success) {
+        mark_joined(ACTIVITY_ID, "success");
+        notify_ntfy(session, cfg, info.name + "报名成功! ",
+                   activity_notification_message(info));
+    } else if (result == SignupResult::already_joined) {
+        mark_joined(ACTIVITY_ID, "already_joined");
+        notify_ntfy(session, cfg, info.name + "已报名! ",
+                   activity_notification_message(info));
+    } else {
+        notify_ntfy(session, cfg, info.name + "报名失败! ",
+                   activity_notification_message(info));
+    }
     return 0;
+}
+
+static std::time_t parse_date(const std::string& value) {
+    std::tm tm{};
+    std::istringstream input(value);
+    input >> std::get_time(&tm, "%Y-%m-%d");
+    if (input.fail()) return 0;
+    tm.tm_hour = 0;
+    tm.tm_min = 0;
+    tm.tm_sec = 0;
+    return std::mktime(&tm);
+}
+
+static int parse_clock_minutes(const std::string& value) {
+    int hour = 0;
+    int minute = 0;
+    char separator = 0;
+    std::istringstream input(value);
+    input >> hour >> separator >> minute;
+    if (input.fail() || separator != ':' || hour < 0 || hour > 23 || minute < 0 || minute > 59)
+        return -1;
+    return hour * 60 + minute;
+}
+
+static std::time_t add_days(std::time_t value, int days) {
+    return value + static_cast<std::time_t>(days) * 24 * 60 * 60;
+}
+
+static CourseSchedule load_course_schedule(bool enabled) {
+    CourseSchedule schedule;
+    if (!enabled) return schedule;
+    std::ifstream in("mycourse.json");
+    if (!in) {
+        LOG_INFO("未找到 mycourse.json, 关闭课表冲突筛选");
+        return schedule;
+    }
+    try {
+        json j = json::parse(in);
+        schedule.semester_start = parse_date(j.value("startDate", ""));
+        if (schedule.semester_start == 0) throw std::runtime_error("startDate 无效");
+        for (const auto& item : j.value("courses", json::array())) {
+            CourseEntry course;
+            course.day = item.value("day", 0);
+            course.start_minute = parse_clock_minutes(item.value("start", ""));
+            course.end_minute = parse_clock_minutes(item.value("end", ""));
+            for (const auto& week : item.value("weeks", json::array()))
+                course.weeks.push_back(week.get<int>());
+            if (course.day >= 1 && course.day <= 7 &&
+                course.start_minute >= 0 && course.end_minute > course.start_minute &&
+                !course.weeks.empty())
+                schedule.courses.push_back(course);
+        }
+        schedule.valid = !schedule.courses.empty();
+        LOG_INFO(schedule.valid ? "已启用课表冲突筛选" : "课表没有有效课程,关闭冲突筛选");
+    } catch (const std::exception& e) {
+        LOG_WARN("读取 mycourse.json 失败,关闭课表冲突筛选: ", e.what());
+    }
+    return schedule;
 }
