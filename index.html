@@ -6,6 +6,7 @@
   <title>PU 活动签到二维码生成器</title>
   <style>
     * { box-sizing: border-box; }
+    html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
     body { margin: 0; background: #f5f6f7; color: #222; font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
     button, input { font: inherit; }
     button { cursor: pointer; }
@@ -38,7 +39,7 @@
   border-radius: 0px;
   box-shadow: none;
   color: rgb(36, 36, 36);
-  font-size: 16.8745px;
+  font-size: 16px;
   font-weight: 400;
   line-height: 25.3118px;
   text-align: start;
@@ -60,7 +61,7 @@
   border-radius: 0px;
   box-shadow: none;
   color: rgb(36, 36, 36);
-  font-size: 16.8745px;
+  font-size: 16px;
   font-weight: 400;
   line-height: 25.3118px;
   text-align: start;
@@ -288,8 +289,17 @@
     const readRecords = () => JSON.parse(localStorage.getItem(STORAGE_KEY) || "[]");
     const writeRecords = records => localStorage.setItem(STORAGE_KEY, JSON.stringify(records));
     const app = document.getElementById("app");
+    let qrTimer = null;
+
+    function stopQrTimer() {
+      if (qrTimer !== null) {
+        clearInterval(qrTimer);
+        qrTimer = null;
+      }
+    }
 
     function renderManager() {
+      stopQrTimer();
       app.className = "";
       app.innerHTML = `
         <main class="manager">
@@ -354,7 +364,7 @@
           const record = readRecords().find(item => item.id === openId);
           if (record) renderQr(record);
         }
-        if (deleteId && confirm("删除这条记录？")) {
+        if (deleteId && confirm("删除这条记录?")) {
           writeRecords(readRecords().filter(item => item.id !== deleteId));
           renderManager();
         }
@@ -362,9 +372,10 @@
     }
 
     function renderQr(record) {
-      let seconds = 10;
+      stopQrTimer();
+      let seconds = 15;
       app.className = "aminui";
-      app.innerHTML = `<div class="activityCode"><header class="qr-header"><button class="qr-back" type="button" aria-label="返回">‹</button><h1>我的二维码</h1></header><main class="scan-sign"><div class="title">用于PU活动签到</div><div class="uid">我的UID为: ${escapeHtml(record.uid)}</div><div class="img-content" id="qr"></div><div class="time-tip"><p class="text">二维码自动更新, 有效时间</p><p class="sec" id="seconds">10s</p></div></main></div>`;
+      app.innerHTML = `<div class="activityCode"><header class="qr-header"><button class="qr-back" type="button" aria-label="返回">‹</button><h1>我的二维码</h1></header><main class="scan-sign"><div class="title">用于PU活动签到</div><div class="uid">我的UID为: ${escapeHtml(record.uid)}</div><div class="img-content" id="qr"></div><div class="time-tip"><p class="text">二维码自动更新, 有效时间</p><p class="sec" id="seconds">0s</p></div></main></div>`;
       document.querySelector(".qr-back").addEventListener("click", renderManager);
       enterFullscreen();
       const draw = () => {
@@ -380,12 +391,12 @@
         });
       };
       draw();
-      const timer = setInterval(() => {
+      qrTimer = setInterval(() => {
         seconds -= 1;
         const counter = document.getElementById("seconds");
-        if (!counter) return clearInterval(timer);
+        if (!counter) return stopQrTimer();
         counter.textContent = seconds + "s";
-        if (seconds <= 0) { seconds = 10; draw(); }
+        if (seconds <= 0) { seconds = 15; draw(); }
       }, 1000);
     }
 
