@@ -807,7 +807,7 @@ static void wait_until(system_clock::time_point target, int advance_ms) {
     }
 }
 
-enum class SignupResult { success, already_joined, failed };
+enum class SignupResult { success, pending_review, already_joined, failed };
 
 static SignupResult fire(Session& session,
                          const std::string& token,
@@ -842,6 +842,10 @@ static SignupResult fire(Session& session,
             if (code == 0 && detail.find("报名成功") != std::string::npos) {
                 LOG_OK("报名成功! (第 ", attempt, " 次): ", detail);
                 return SignupResult::success;
+            }
+            if (code == 0 && detail.find("已提交报名审核") != std::string::npos) {
+                LOG_OK("可能报名成功(需审核) (第 ", attempt, " 次): ", detail);
+                return SignupResult::pending_review;
             }
             if (code == 9405 && (message.find("已报名") != std::string::npos ||
                                  detail.find("已报名") != std::string::npos)) {
@@ -888,6 +892,10 @@ static void signup_and_notify(Session& session, const std::string& token,
         result_text = "报名成功";
         title_suffix = "报名成功";
         mark_joined(id, "success");
+    } else if (result == SignupResult::pending_review) {
+        result_text = "可能报名成功(需审核)";
+        title_suffix = "可能报名成功(需审核)";
+        mark_joined(id, "pending_review");
     } else if (result == SignupResult::already_joined) {
         result_text = "已报名, 已加入本地记录";
         title_suffix = "已报名";
@@ -1160,6 +1168,10 @@ int main(int argc, char* argv[]) {
     if (result == SignupResult::success) {
         mark_joined(ACTIVITY_ID, "success");
         notify_ntfy(session, cfg, info.name + "报名成功! ",
+                   activity_notification_message(info));
+    } else if (result == SignupResult::pending_review) {
+        mark_joined(ACTIVITY_ID, "pending_review");
+        notify_ntfy(session, cfg, info.name + "可能报名成功(需审核)! ",
                    activity_notification_message(info));
     } else if (result == SignupResult::already_joined) {
         mark_joined(ACTIVITY_ID, "already_joined");
