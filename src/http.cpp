@@ -22,7 +22,15 @@ std::string win_error_message(DWORD error) {
     LocalFree(buffer);
     while (!message.empty() && (message.back() == L'\r' || message.back() == L'\n'))
         message.pop_back();
-    return std::string(message.begin(), message.end());
+    if (message.empty()) return {};
+    const int utf8_size = WideCharToMultiByte(CP_UTF8, 0, message.data(),
+                                               static_cast<int>(message.size()),
+                                               nullptr, 0, nullptr, nullptr);
+    if (utf8_size <= 0) return {};
+    std::string result(utf8_size, '\0');
+    WideCharToMultiByte(CP_UTF8, 0, message.data(), static_cast<int>(message.size()),
+                        result.data(), utf8_size, nullptr, nullptr);
+    return result;
 }
 
 std::wstring utf8_to_wide(const std::string& value) {

@@ -30,7 +30,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
@@ -44,24 +44,27 @@ jobs:
       - name: Build
         run: cmake --build build --config Release --parallel
 
-      - name: Prepare release folder
-        shell: bash
-        run: |
-          mkdir -p "package/${{ matrix.package_name }}"
-          cp "${{ matrix.binary_path }}" "package/${{ matrix.package_name }}/"
-          cp config.example.json mycourse.example.json README.md LICENSE "package/${{ matrix.package_name }}/"
-
       - name: Create Linux archive
         if: runner.os == 'Linux'
-        run: zip -r "${{ matrix.archive_name }}" "package/${{ matrix.package_name }}"
+        shell: bash
+        run: |
+          release_dir="$(mktemp -d)"
+          package_path="$release_dir/${{ matrix.package_name }}"
+          mkdir -p "$package_path"
+          cp "${{ matrix.binary_path }}" config.example.json mycourse.example.json README.md LICENSE myqrcode.html "$package_path/"
+          (cd "$release_dir" && zip -r "$GITHUB_WORKSPACE/${{ matrix.archive_name }}" "${{ matrix.package_name }}")
 
       - name: Create Windows archive
         if: runner.os == 'Windows'
         shell: pwsh
-        run: Compress-Archive -Path "package/${{ matrix.package_name }}" -DestinationPath "${{ matrix.archive_name }}"
+        run: |
+          $releaseDir = Join-Path $env:RUNNER_TEMP "${{ matrix.package_name }}"
+          New-Item -ItemType Directory -Force -Path $releaseDir | Out-Null
+          Copy-Item "${{ matrix.binary_path }}", config.example.json, mycourse.example.json, README.md, LICENSE, myqrcode.html $releaseDir -Force
+          Compress-Archive -Path $releaseDir -DestinationPath "${{ matrix.archive_name }}"
 
       - name: Upload release archive
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: ${{ matrix.archive_name }}
           path: ${{ matrix.archive_name }}
@@ -82,4 +85,10 @@ jobs:
       - name: Create release and upload binaries
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "${{ github.ref_name }}" dist/* --title "${{ github.ref_name }}" --generate-notes
+        shell: bash
+        run: |
+          if gh release view "${{ github.ref_name }}" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            gh release upload "${{ github.ref_name }}" dist/* --clobber --repo "${{ github.repository }}"
+          else
+            gh release create "${{ github.ref_name }}" dist/* --repo "${{ github.repository }}" --title "${{ github.ref_name }}" --generate-notes
+          fi
