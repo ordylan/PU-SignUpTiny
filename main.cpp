@@ -14,6 +14,7 @@
 #include <cstdlib>
 #include <ctime>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <iomanip>
 #include <fstream>
@@ -26,6 +27,7 @@
 #include <sstream>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 #include "libs/json.hpp"
@@ -47,8 +49,9 @@ static const std::string INFO_URL  = "https://apis.pocketuni.net/activity/basic/
 static const std::string JOIN_URL  = "https://apis.pocketuni.net/apis/activity/join";
 static const std::string LIST_URL  = "https://apis.pocketuni.net/apis/activity/list";
 static const std::string VERSION_URL = "https://class.pocketuni.net/version.json?t=";
+static constexpr auto SIGNUP_REQUEST_INTERVAL = milliseconds(1500);
 
-#define PROGRAM_VERSION "V_12731792034892744"
+#define PROGRAM_VERSION "V_73071793712022777"
 
 static const uint8_t PSK[16] = {
     121, 121, 0, 19, 5, 49, 2, 43, 13, 17, 11, 9, 4, 29, 60, 11
@@ -57,8 +60,11 @@ static const uint8_t PSK[16] = {
 static std::mutex g_log_mtx;
 static std::mutex g_joined_mtx;
 static std::mutex g_signup_cooldown_mtx;
+static std::mutex g_scheduled_tasks_mtx;
 static std::set<std::string> g_pending_activities;
-static system_clock::time_point g_signup_cooldown_until{};
+static std::unordered_map<std::string, std::shared_ptr<struct ScheduledActivityTask>>
+    g_scheduled_tasks;
+static system_clock::time_point g_next_signup_request_at{};
 
 static std::string now_str() {
     auto t = system_clock::to_time_t(system_clock::now());
@@ -91,8 +97,8 @@ static void wait_for_signup_slot(const std::string& activity_id) {
     system_clock::time_point slot;
     {
         std::lock_guard<std::mutex> lock(g_signup_cooldown_mtx);
-        slot = std::max(system_clock::now(), g_signup_cooldown_until);
-        g_signup_cooldown_until = slot + seconds(1);
+        slot = std::max(system_clock::now(), g_next_signup_request_at);
+        g_next_signup_request_at = slot + SIGNUP_REQUEST_INTERVAL;
     }
     const auto wait_ms = duration_cast<milliseconds>(slot - system_clock::now()).count();
     if (wait_ms > 0)
@@ -468,14 +474,19 @@ static bool contains_name(const std::vector<std::string>& names, const std::stri
     return std::find(names.begin(), names.end(), value) != names.end();
 }
 
-static bool is_joinable_status(const std::string& status) {
-    return status == "报名未开始" || status == "报名进行中";
-}
-
 static bool is_activity_full(const json& activity) {
     const auto capacity = activity.value("allowUserCount", 0LL);
     const auto joined = activity.value("joinUserCount", 0LL);
     return capacity > 0 && joined >= capacity;
+}
+
+static system_clock::time_point parse_dt(const std::string& s);
+
+static bool activity_has_ended(const json& activity) {
+    const auto end_time = activity.value("endTime", "");
+    if (end_time.empty()) return false;
+    const auto end = parse_dt(end_time);
+    return end != system_clock::time_point{} && end <= system_clock::now();
 }
 
 static std::time_t parse_saved_at(const json& value) {
@@ -582,6 +593,48 @@ struct ActivityInfo {
     std::vector<std::string> allowed_colleges;
 };
 
+struct ActivityListEntry {
+    std::string id;
+    json item;
+};
+
+struct ScheduledActivityTask {
+    std::mutex mutex;
+    std::condition_variable changed;
+    ActivityInfo activity;
+    system_clock::time_point start;
+    bool cancelled = false;
+    bool executing = false;
+};
+
+static void cancel_scheduled_task(const std::string& id, const char* reason) {
+    std::shared_ptr<ScheduledActivityTask> task;
+    {
+        std::lock_guard<std::mutex> lock(g_scheduled_tasks_mtx);
+        auto task_it = g_scheduled_tasks.find(id);
+        if (task_it != g_scheduled_tasks.end()) task = task_it->second;
+    }
+    if (!task) return;
+
+    {
+        std::lock_guard<std::mutex> lock(task->mutex);
+        if (task->cancelled || task->executing || task->start <= system_clock::now()) return;
+        task->cancelled = true;
+    }
+    task->changed.notify_one();
+    LOG_INFO("已取消活动对应定时任务: ", id, " | 原因: ", reason);
+}
+
+static bool activity_cache_matches_list(const ActivityInfo& cached,
+                                         const json& item) {
+    return item.contains("name") && cached.name == item.value("name", "") &&
+        item.contains("credit") && cached.credit == item.value("credit", 0.0) &&
+        item.contains("joinStartTime") &&
+            cached.joinStartTime == item.value("joinStartTime", "") &&
+        item.contains("startTime") && cached.startTime == item.value("startTime", "") &&
+        item.contains("endTime") && cached.endTime == item.value("endTime", "");
+}
+
 static std::string activity_notification_message(const ActivityInfo& activity) {
     return "活动时间: " + activity.startTime + " - " + activity.endTime +
            "\n活动地点: " + activity.address;
@@ -615,8 +668,6 @@ static ActivityInfo get_activity(Session& session,
     }
     return info;
 }
-
-static system_clock::time_point parse_dt(const std::string& s);
 
 static bool overlaps_course(const ActivityInfo& activity, const CourseSchedule& schedule) {
     if (!schedule.valid || activity.startTime.empty() || activity.endTime.empty()) return false;
@@ -717,7 +768,7 @@ static std::vector<ActivityInfo> list_possible_activities(Session& session,
                                                             bool* auth_failed = nullptr) {
     if (auth_failed) *auth_failed = false;
     std::vector<ActivityInfo> result;
-    std::vector<std::string> activity_ids;
+    std::vector<ActivityListEntry> activity_entries;
     int page = 1;
     int total_pages = 1;
     while (true) {
@@ -743,22 +794,34 @@ static std::vector<ActivityInfo> list_possible_activities(Session& session,
         total_pages = std::max(1, page_info.value("total", page));
         LOG_INFO("扫描活动列表: 第 ", page, "/", total_pages, " 页");
         for (const auto& item : list) {
-            if (!is_joinable_status(item.value("startTimeValue", ""))) continue;
-            if (is_activity_full(item)) continue;
-            activity_ids.push_back(std::to_string(item.value("id", 0LL)));
+            const auto id = std::to_string(item.value("id", 0LL));
+            if (activity_has_ended(item)) {
+                cancel_scheduled_task(id, "活动已经结束");
+                continue;
+            }
+            if (is_activity_full(item)) {
+                cancel_scheduled_task(id, "活动人数已满");
+                continue;
+            }
+            activity_entries.push_back({id, item});
         }
         if (page >= total_pages) break;
         ++page;
         std::this_thread::sleep_for(milliseconds(LIST_PAGE_DELAY_MS));
     }
 
-    const size_t total_details = activity_ids.size();
+    const size_t total_details = activity_entries.size();
     LOG_INFO("共发现 ", total_details, " 个可报名活动, 开始获取详情");
     for (size_t index = 0; index < total_details; ++index) {
-        const auto& id = activity_ids[index];
+        const auto& entry = activity_entries[index];
+        const auto& id = entry.id;
         ActivityInfo info;
         bool cached = load_cached_activity(id, info);
-        if (!cached) {
+        const bool cache_matches = cached && activity_cache_matches_list(info, entry.item);
+        const bool refresh_detail = !cache_matches;
+        if (cached && !cache_matches)
+            LOG_INFO("活动列表与详情缓存不一致, 刷新详情: ", id);
+        if (refresh_detail) {
             info = get_activity(session, token, id);
             if (info.id != 0) cache_activity(info);
         }
@@ -767,11 +830,38 @@ static std::vector<ActivityInfo> list_possible_activities(Session& session,
             contains_name(info.allowed_colleges, cfg.college);
         const bool schedule_ok = !overlaps_course(info, schedule);
         info.eligible = category_ok && college_ok && schedule_ok;
+        const auto activity_end = parse_dt(info.endTime);
+        const bool detail_has_ended = activity_end != system_clock::time_point{} &&
+            activity_end <= system_clock::now();
+        if (!info.eligible || detail_has_ended) {
+            cancel_scheduled_task(id, !info.eligible ? "最新活动详情不再符合筛选条件" : "活动已经结束");
+        }
+        {
+            std::shared_ptr<ScheduledActivityTask> task;
+            {
+                std::lock_guard<std::mutex> lock(g_scheduled_tasks_mtx);
+                auto task_it = g_scheduled_tasks.find(id);
+                if (task_it != g_scheduled_tasks.end()) task = task_it->second;
+            }
+            if (task) {
+                std::lock_guard<std::mutex> lock(task->mutex);
+                const auto updated_start = parse_dt(info.joinStartTime);
+                if (info.id != 0 && updated_start != system_clock::time_point{} &&
+                    !task->cancelled && !task->executing &&
+                    task->start > system_clock::now()) {
+                    task->activity = info;
+                    task->start = updated_start;
+                    task->changed.notify_one();
+                    LOG_INFO("已更新活动对应定时任务: ", id,
+                             " | ", info.name, " | 报名时间: ", info.joinStartTime);
+                }
+            }
+        }
         LOG_INFO("详情进度 [", index + 1, "/", total_details, "]",
-                 cached ? " 使用缓存" : " 已请求",
+                 refresh_detail ? " 已请求" : " 使用缓存",
                  info.eligible ? ",符合筛选条件" : ",已过滤");
         if (info.eligible) result.push_back(info);
-        if (!cached && index + 1 < total_details)
+        if (refresh_detail && index + 1 < total_details)
             std::this_thread::sleep_for(milliseconds(DETAIL_REQUEST_DELAY_MS));
     }
     return result;
@@ -805,7 +895,9 @@ static system_clock::time_point parse_dt(const std::string& s) {
     std::tm tm{};
     std::istringstream ss(s);
     ss >> std::get_time(&tm, "%Y-%m-%d %H:%M:%S");
+    if (ss.fail()) return {};
     std::time_t t = std::mktime(&tm);
+    if (t == static_cast<std::time_t>(-1)) return {};
     return system_clock::from_time_t(t);
 }
 
@@ -1020,15 +1112,54 @@ static void run_service(Session& session, Config cfg, bool ignore_version,
                     const auto task_start = start - minutes(5);
                     const auto wait_ms = duration_cast<milliseconds>(
                         task_start - system_clock::now()).count();
+                    auto task = std::make_shared<ScheduledActivityTask>();
+                    task->activity = activity;
+                    task->start = start;
+                    {
+                        std::lock_guard<std::mutex> lock(g_scheduled_tasks_mtx);
+                        g_scheduled_tasks[activity_id] = task;
+                    }
                     LOG_OK("创建定时报名任务: ", activity.name, " (", activity.id,
                              "), 提前 5 分钟启动, 等待 ", std::max<int64_t>(0, wait_ms),
                              " ms, 报名序号 ", same_start_rank + 1);
-                    std::thread([&session, token_state, cfg, activity, start, wait_ms]() {
+                    std::thread([&session, token_state, cfg, task]() {
+                        ActivityInfo current_activity;
+                        system_clock::time_point current_start;
+                        {
+                            std::unique_lock<std::mutex> lock(task->mutex);
+                            while (true) {
+                                if (task->cancelled) {
+                                    const auto activity_id = std::to_string(task->activity.id);
+                                    lock.unlock();
+                                    {
+                                        std::lock_guard<std::mutex> pending_lock(g_joined_mtx);
+                                        g_pending_activities.erase(activity_id);
+                                    }
+                                    std::lock_guard<std::mutex> tasks_lock(g_scheduled_tasks_mtx);
+                                    auto task_it = g_scheduled_tasks.find(activity_id);
+                                    if (task_it != g_scheduled_tasks.end() && task_it->second == task)
+                                        g_scheduled_tasks.erase(task_it);
+                                    return;
+                                }
+                                current_start = task->start;
+                                const auto task_start = current_start - minutes(5);
+                                if (task_start <= system_clock::now()) {
+                                    task->executing = true;
+                                    break;
+                                }
+                                task->changed.wait_until(lock, task_start);
+                            }
+                            current_activity = task->activity;
+                        }
+                        const auto wait_ms = duration_cast<milliseconds>(
+                            current_start - system_clock::now()).count();
                         if (wait_ms > 0) std::this_thread::sleep_for(milliseconds(wait_ms));
                         ensure_service_token(session, cfg, *token_state);
-                        wait_until(start, 0);
+                        wait_until(current_start, 0);
                         const auto task_token = ensure_service_token(session, cfg, *token_state);
-                        signup_and_notify(session, task_token, cfg, activity);
+                        signup_and_notify(session, task_token, cfg, current_activity);
+                        std::lock_guard<std::mutex> lock(g_scheduled_tasks_mtx);
+                        g_scheduled_tasks.erase(std::to_string(current_activity.id));
                     }).detach();
                 } else {
                     LOG_OK("创建立即报名任务: ", activity.name, " (", activity.id,
