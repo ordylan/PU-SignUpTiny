@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(PU-SignUpTiny VERSION 2.0 LANGUAGES CXX)
+project(PU-SignUpTiny VERSION 2.0.1 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -38,6 +38,7 @@ endif()
 include(GNUInstallDirs)
 install(TARGETS pu-signup-tiny RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 install(FILES config.example.json DESTINATION .)
+install(FILES mycourse.example.json DESTINATION .)
 install(FILES README.md LICENSE DESTINATION ${CMAKE_INSTALL_DOCDIR})
 install(DIRECTORY libs/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/pu-signup-tiny)
 

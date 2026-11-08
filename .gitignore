@@ -1,0 +1,11 @@
+config.json
+session.json
+activity_cache.json
+joined_activities.json
+mycourse.json
+build/
+.vscode/
+*.exe
+*.o
+*.out
+note.txt

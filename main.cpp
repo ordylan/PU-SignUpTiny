@@ -53,7 +53,9 @@ static const uint8_t PSK[16] = {
 
 static std::mutex g_log_mtx;
 static std::mutex g_joined_mtx;
+static std::mutex g_signup_cooldown_mtx;
 static std::set<std::string> g_pending_activities;
+static system_clock::time_point g_signup_cooldown_until{};
 
 static std::string now_str() {
     auto t = system_clock::to_time_t(system_clock::now());
@@ -81,6 +83,19 @@ static void log_line(const char* tag, Args&&... args) {
 #define LOG_WARN(...) log_line("WARN ", __VA_ARGS__)
 #define LOG_ERR(...)  log_line("ERROR", __VA_ARGS__)
 #define LOG_DBG(...)  log_line("DEBUG", __VA_ARGS__)
+
+static void wait_for_signup_slot(const std::string& activity_id) {
+    system_clock::time_point slot;
+    {
+        std::lock_guard<std::mutex> lock(g_signup_cooldown_mtx);
+        slot = std::max(system_clock::now(), g_signup_cooldown_until);
+        g_signup_cooldown_until = slot + seconds(1);
+    }
+    const auto wait_ms = duration_cast<milliseconds>(slot - system_clock::now()).count();
+    if (wait_ms > 0)
+        LOG_INFO("活动 ", activity_id, " 已主动错峰, 延迟 ", wait_ms, " ms");
+    std::this_thread::sleep_until(slot);
+}
 
 // AES-CBC, PKCS7 padding, random bytes, and Base64 are provided by Windows APIs.
 static std::string base64_encode(const std::vector<uint8_t>& data) {
@@ -824,6 +839,7 @@ static SignupResult fire(Session& session,
 
     while (system_clock::now() < deadline) {
         ++attempt;
+        wait_for_signup_slot(activity_id);
         auto h = auth_headers(token);
         h.push_back("X-Sign: " + make_x_sign());
 
@@ -851,6 +867,11 @@ static SignupResult fire(Session& session,
                                  detail.find("已报名") != std::string::npos)) {
                 LOG_OK("活动已报名, 停止重试");
                 return SignupResult::already_joined;
+            }
+            if (code == 500 && (message.find("请勿频繁点击") != std::string::npos ||
+                                detail.find("请勿频繁点击") != std::string::npos)) {
+                LOG_WARN("报名请求仍被服务端判定为过于频繁, 停止当前任务");
+                return SignupResult::failed;
             }
             if (code == 500 || code == 9405) {
                 LOG_ERR("报名终止: code=", code, ", message=", message);
@@ -999,22 +1020,17 @@ static void run_service(Session& session, Config cfg, bool ignore_version,
                     LOG_OK("创建定时报名任务: ", activity.name, " (", activity.id,
                              "), 提前 5 分钟启动, 等待 ", std::max<int64_t>(0, wait_ms),
                              " ms, 报名序号 ", same_start_rank + 1);
-                    std::thread([&session, token_state, cfg, activity, start, wait_ms,
-                                 same_start_rank]() {
+                    std::thread([&session, token_state, cfg, activity, start, wait_ms]() {
                         if (wait_ms > 0) std::this_thread::sleep_for(milliseconds(wait_ms));
                         ensure_service_token(session, cfg, *token_state);
                         wait_until(start, 0);
-                        if (same_start_rank > 0)
-                            std::this_thread::sleep_for(seconds(static_cast<int>(same_start_rank)));
                         const auto task_token = ensure_service_token(session, cfg, *token_state);
                         signup_and_notify(session, task_token, cfg, activity);
                     }).detach();
                 } else {
                     LOG_OK("创建立即报名任务: ", activity.name, " (", activity.id,
                              "), 报名序号 ", same_start_rank + 1);
-                    std::thread([&session, token_state, cfg, activity, same_start_rank]() {
-                        if (same_start_rank > 0)
-                            std::this_thread::sleep_for(seconds(static_cast<int>(same_start_rank)));
+                    std::thread([&session, token_state, cfg, activity]() {
                         const auto task_token = ensure_service_token(session, cfg, *token_state);
                         signup_and_notify(session, task_token, cfg, activity);
                     }).detach();
