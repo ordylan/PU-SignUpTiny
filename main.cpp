@@ -46,6 +46,7 @@ static constexpr int LIST_PAGE_DELAY_MS = 800;
 static constexpr int DETAIL_REQUEST_DELAY_MS = 1200;
 static const std::string LOGIN_URL = "https://apis.pocketuni.net/uc/user/login";
 static const std::string INFO_URL  = "https://apis.pocketuni.net/activity/basic/info/";
+static const std::string JOIN_STATUS_URL = "https://apis.pocketuni.net/apis/activity/info";
 static const std::string JOIN_URL  = "https://apis.pocketuni.net/apis/activity/join";
 static const std::string LIST_URL  = "https://apis.pocketuni.net/apis/activity/list";
 static const std::string VERSION_URL = "https://class.pocketuni.net/version.json?t=";
@@ -62,6 +63,7 @@ static std::mutex g_joined_mtx;
 static std::mutex g_signup_cooldown_mtx;
 static std::mutex g_scheduled_tasks_mtx;
 static std::set<std::string> g_pending_activities;
+static std::set<std::string> g_reminder_tasks;
 static std::unordered_map<std::string, std::shared_ptr<struct ScheduledActivityTask>>
     g_scheduled_tasks;
 static system_clock::time_point g_next_signup_request_at{};
@@ -75,7 +77,7 @@ static std::string now_str() {
     localtime_r(&t, &tm);
 #endif
     char buf[32];
-    std::strftime(buf, sizeof(buf), "%H:%M:%S", &tm);
+    std::strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &tm);
     return buf;
 }
 
@@ -337,14 +339,16 @@ static std::string url_encode(const std::string& value) {
     return encoded;
 }
 
-static void notify_ntfy(Session& session, const Config& cfg,
-                        const std::string& title, const std::string& message) {
+static std::string publish_ntfy(Session& session, const Config& cfg,
+                                const std::string& title, const std::string& message,
+                                int priority = 3) {
     const auto base_url = ntfy_url(cfg);
     if (base_url.empty()) {
         LOG_WARN("未发送 ntfy 通知: 未配置 ntfy_server 和 ntfy_topic");
-        return;
+        return {};
     }
-    const auto url = base_url + "?title=" + url_encode(title) + "&priority=3";//你可以改 我就用默认3了
+    auto url = base_url + "?title=" + url_encode(title) +
+        "&priority=" + std::to_string(priority);
     auto headers = base_headers();
     if (!cfg.ntfy_username.empty()) {
         const auto credentials = cfg.ntfy_username + ":" + cfg.ntfy_password;
@@ -355,26 +359,54 @@ static void notify_ntfy(Session& session, const Config& cfg,
     const auto response = session.post(url, headers, message, 10);
     if (response.status < 200 || response.status >= 300)
         LOG_WARN("ntfy 通知失败, status=", response.status, " body=", response.body);
-    else
+    else {
         LOG_INFO("ntfy 通知发送成功, status=", response.status);
+        try {
+            const auto body = json::parse(response.body);
+            return body.value("id", "");
+        } catch (...) {
+            LOG_WARN("ntfy 响应不是有效 JSON, 无法保存通知 id: ", response.body);
+        }
+    }
+    return {};
+}
+
+static void notify_ntfy(Session& session, const Config& cfg,
+                        const std::string& title, const std::string& message) {
+    publish_ntfy(session, cfg, title, message);
+}
+
+struct JoinedActivityRecord {
+    bool exists = false;
+    bool reminder_completed = false;
+    bool reminder_sent = false;
+};
+
+static JoinedActivityRecord load_joined_record_unlocked(const std::string& activity_id) {
+    JoinedActivityRecord record;
+    std::ifstream in("joined_activities.json");
+    if (!in) return record;
+    try {
+        json cache; in >> cache;
+        if (!cache.contains(activity_id)) return record;
+        record.exists = true;
+        const auto& item = cache[activity_id];
+        if (item.is_object()) {
+            record.reminder_completed = item.value("reminder_completed", false);
+            record.reminder_sent = item.value("reminder_sent", false);
+        }
+    } catch (...) {}
+    return record;
 }
 
 static bool is_joined_cached_unlocked(const std::string& activity_id) {
-    std::ifstream in("joined_activities.json");
-    if (!in) {
+    const auto record = load_joined_record_unlocked(activity_id);
+    if (!record.exists) {
         LOG_INFO("未找到本地报名记录: joined_activities.json");
         return false;
     }
-    try {
-        json cache;
-        in >> cache;
-        const bool joined = cache.contains(activity_id);
-        LOG_INFO(joined ? "本地报名记录命中: " : "本地报名记录未命中: ", activity_id);
-        return joined;
-    } catch (...) {
-        LOG_WARN("读取本地报名记录失败, 按未报名处理: joined_activities.json");
-        return false;
-    }
+    LOG_INFO("本地报名记录命中: ", activity_id);
+    return true;
 }
 
 static bool is_joined_cached(const std::string& activity_id) {
@@ -382,12 +414,19 @@ static bool is_joined_cached(const std::string& activity_id) {
     return is_joined_cached_unlocked(activity_id);
 }
 
-static void mark_joined(const std::string& activity_id, const std::string& result) {
+static void mark_joined(const std::string& activity_id, const std::string& result,
+                        bool reminder_completed = false,
+                        bool reminder_sent = false) {
     std::lock_guard<std::mutex> lock(g_joined_mtx);
     json cache = json::object();
     std::ifstream in("joined_activities.json");
     try { if (in) in >> cache; } catch (...) { cache = json::object(); }
-    cache[activity_id] = json{{"result", result}, {"saved_at", std::time(nullptr)}};
+    auto& item = cache[activity_id];
+    if (!item.is_object()) item = json::object();
+    if (!result.empty()) item["result"] = result;
+    item["saved_at"] = std::time(nullptr);
+    if (reminder_completed) item["reminder_completed"] = true;
+    if (reminder_sent) item["reminder_sent"] = true;
     std::ofstream out("joined_activities.json", std::ios::trunc);
     if (!out) {
         LOG_ERR("无法写入本地报名记录: joined_activities.json");
@@ -404,6 +443,11 @@ static void mark_joined(const std::string& activity_id, const std::string& resul
     } catch (...) {
         LOG_INFO("本地报名记录已写入: joined_activities.json");
     }
+}
+
+static void log_cache_write_failure(const char* path, bool open_failed) {
+    LOG_ERR("缓存写入失败: ", path,
+            open_failed ? " | 无法打开文件" : " | 写入文件失败");
 }
 
 struct CourseEntry {
@@ -590,6 +634,8 @@ struct ActivityInfo {
     double credit = 0;
     std::string category;
     bool eligible = false;
+    bool joined_known = false;
+    bool joined = false;
     std::vector<std::string> allowed_colleges;
 };
 
@@ -659,12 +705,43 @@ static ActivityInfo get_activity(Session& session,
             info.address = b.value("address", "");
             info.credit = b.value("credit", 0.0);
             info.category = b.value("category", json::object()).value("name", "");
+            if (b.contains("isJoin")) {
+                info.joined_known = true;
+                info.joined = b.value("isJoin", false);
+            } else if (b.contains("isJoined")) {
+                info.joined_known = true;
+                info.joined = b.value("isJoined", false);
+            } else if (b.contains("joinStatus")) {
+                info.joined_known = true;
+                info.joined = b.value("joinStatus", 0LL) != 0;
+            }
             info.creditName = info.category;
             for (const auto& college : b.value("allowCollege", json::array()))
                 info.allowed_colleges.push_back(college.value("name", ""));
         }
     } catch (const std::exception& e) {
         LOG_ERR("解析活动信息失败: ", e.what(), " 原文=", r.body);
+    }
+    return info;
+}
+
+static ActivityInfo get_live_activity_status(Session& session,
+                                              const std::string& token,
+                                              const std::string& activity_id) {
+    json request_body{{"id", std::stoll(activity_id)}};
+    auto r = session.post(JOIN_STATUS_URL, auth_headers(token), request_body.dump(), 10);
+
+    ActivityInfo info;
+    try {
+        auto j = json::parse(r.body);
+        const auto data = j.value("data", json::object());
+        const auto user_status = data.value("userStatus", json::object());
+        if (user_status.contains("hasJoin")) {
+            info.joined_known = true;
+            info.joined = user_status.value("hasJoin", 0) == 1;
+        }
+    } catch (const std::exception& e) {
+        LOG_ERR("解析活动报名状态失败: ", e.what(), " 原文=", r.body);
     }
     return info;
 }
@@ -713,12 +790,12 @@ static void cache_activity(const ActivityInfo& info) {
     };
     std::ofstream out("activity_cache.json", std::ios::trunc);
     if (!out) {
-        LOG_ERR("无法写入活动详情缓存: activity_cache.json");
+        log_cache_write_failure("activity_cache.json", true);
         return;
     }
     out << cache.dump(2);
     if (!out) {
-        LOG_ERR("写入活动详情缓存失败: activity_cache.json");
+        log_cache_write_failure("activity_cache.json", false);
         return;
     }
     try {
@@ -919,6 +996,46 @@ static void wait_until(system_clock::time_point target, int advance_ms) {
 
 enum class SignupResult { success, pending_review, already_joined, failed };
 
+static const char* signup_result_text(SignupResult result) {
+    switch (result) {
+    case SignupResult::success: return "报名成功";
+    case SignupResult::pending_review: return "可能报名成功(需审核)";
+    case SignupResult::already_joined: return "已报名, 已加入本地记录";
+    case SignupResult::failed: return "报名失败或服务端拒绝";
+    }
+    return "报名结果未知";
+}
+
+static const char* signup_title_suffix(SignupResult result) {
+    switch (result) {
+    case SignupResult::success: return "报名成功";
+    case SignupResult::pending_review: return "可能报名成功(需审核)";
+    case SignupResult::already_joined: return "已报名";
+    case SignupResult::failed: return "报名失败";
+    }
+    return "报名结果未知";
+}
+
+static void log_reminder_skipped(const ActivityInfo& activity, const char* reason,
+                                 bool warning = false) {
+    if (warning)
+        LOG_WARN("参加提醒跳过: ", activity.name, " | 原因: ", reason);
+    else
+        LOG_INFO("参加提醒跳过: ", activity.name, " | 原因: ", reason);
+}
+
+static void log_signup_task_created(const ActivityInfo& activity, bool scheduled,
+                                    int64_t wait_ms, size_t rank) {
+    if (scheduled) {
+        LOG_OK("创建定时报名任务: ", activity.name, " (", activity.id,
+               "), 提前 5 分钟启动, 等待 ", std::max<int64_t>(0, wait_ms),
+               " ms, 报名序号 ", rank);
+    } else {
+        LOG_OK("创建立即报名任务: ", activity.name, " (", activity.id,
+               "), 报名序号 ", rank);
+    }
+}
+
 static SignupResult fire(Session& session,
                          const std::string& token,
                          const std::string& activity_id,
@@ -983,8 +1100,99 @@ static SignupResult fire(Session& session,
     return SignupResult::failed;
 }
 
+static void schedule_participation_reminder(Session& session, const std::string& token,
+                                            const Config& cfg, const ActivityInfo& activity) {
+    const auto id = std::to_string(activity.id);
+    {
+        std::lock_guard<std::mutex> lock(g_scheduled_tasks_mtx);
+        if (!g_reminder_tasks.insert(id).second) return;
+    }
+    std::thread([&session, token, cfg, activity]() {
+        const auto id = std::to_string(activity.id);
+        const auto start = parse_dt(activity.startTime);
+        if (start == system_clock::time_point{}) {
+            mark_joined(id, "", true, false);
+            log_reminder_skipped(activity, "活动开始时间无效", true);
+        } else if (start <= system_clock::now()) {
+            mark_joined(id, "", true, false);
+            log_reminder_skipped(activity, "活动已开始");
+        } else {
+            const auto reminder_at = start - minutes(15);
+            if (reminder_at > system_clock::now())
+                std::this_thread::sleep_until(reminder_at);
+
+            if (system_clock::now() >= start) {
+                mark_joined(id, "", true, false);
+                log_reminder_skipped(activity, "活动已开始");
+            } else {
+                const auto detail = get_live_activity_status(session, token, id);
+                if (!detail.joined_known) {
+                    LOG_WARN("活动报名状态校验失败, 保留参加提醒等待下次恢复: ", activity.name);
+                } else if (!detail.joined) {
+                    mark_joined(id, "", true, false);
+                    log_reminder_skipped(activity, "活动已取消报名");
+                } else {
+                    const auto response_id = publish_ntfy(
+                        session, cfg, activity.name + " in 15 mins!",
+                        "快去 " + activity.address + " !\n将于" +
+                            activity.startTime + "开始, 记得准时参加! ", 5);
+                    if (!response_id.empty()) {
+                        mark_joined(id, "", true, true);
+                        LOG_INFO("参加提醒已发送: ", activity.name);
+                    } else {
+                        LOG_WARN("参加提醒发送失败, 保留任务等待下次恢复: ", activity.name);
+                    }
+                }
+            }
+        }
+        std::lock_guard<std::mutex> lock(g_scheduled_tasks_mtx);
+        g_reminder_tasks.erase(id);
+    }).detach();
+}
+
+static void restore_participation_reminders(Session& session, const std::string& token,
+                                            const Config& cfg) {
+    std::ifstream in("joined_activities.json");
+    if (!in) return;
+    try {
+        json cache; in >> cache;
+        for (auto it = cache.begin(); it != cache.end(); ++it) {
+            const auto result = it.value().value("result", "");
+            if (result != "success" && result != "already_joined") continue;
+            ActivityInfo activity;
+            if (!load_cached_activity(it.key(), activity)) {
+                activity = get_activity(session, token, it.key());
+                if (activity.id != 0) cache_activity(activity);
+            }
+            if (activity.id == 0 || activity.startTime.empty()) continue;
+            const auto start = parse_dt(activity.startTime);
+            if (start == system_clock::time_point{}) {
+                mark_joined(it.key(), "", true, false);
+                log_reminder_skipped(activity, "活动开始时间无效", true);
+                continue;
+            }
+            const auto record = load_joined_record_unlocked(it.key());
+            if (record.reminder_completed || record.reminder_sent) continue;
+            if (start <= system_clock::now()) {
+                mark_joined(it.key(), "", true, false);
+                continue;
+            }
+            if (!ntfy_url(cfg).empty()) {
+                schedule_participation_reminder(session, token, cfg, activity);
+            } else {
+                mark_joined(it.key(), "", true, false);
+                //这个按理可不跳过 因为用户可能中途填写  但是不考虑修复这个缺点
+                log_reminder_skipped(activity, "未配置 ntfy");
+            }
+        }
+    } catch (const std::exception& e) {
+        LOG_WARN("恢复参加提醒失败: ", e.what());
+    }
+}
+
 static void signup_and_notify(Session& session, const std::string& token,
-                              const Config& cfg, const ActivityInfo& activity) {
+                              const Config& cfg, const ActivityInfo& activity,
+                              bool participation_reminder = false) {
     const auto id = std::to_string(activity.id);
     LOG_INFO("报名任务开始: ", activity.name, " (", id, ")");
     {
@@ -1002,27 +1210,21 @@ static void signup_and_notify(Session& session, const std::string& token,
         g_pending_activities.erase(id);
     }
 
-    std::string result_text;
-    std::string title_suffix;
     if (result == SignupResult::success) {
-        result_text = "报名成功";
-        title_suffix = "报名成功";
         mark_joined(id, "success");
     } else if (result == SignupResult::pending_review) {
-        result_text = "可能报名成功(需审核)";
-        title_suffix = "可能报名成功(需审核)";
         mark_joined(id, "pending_review");
     } else if (result == SignupResult::already_joined) {
-        result_text = "已报名, 已加入本地记录";
-        title_suffix = "已报名";
         mark_joined(id, "already_joined");
-    } else {
-        result_text = "报名失败或服务端拒绝";
-        title_suffix = "报名失败";
     }
-    LOG_INFO("报名任务结束: ", activity.name, " (", id, ") -> ", result_text);
+    LOG_INFO("报名任务结束: ", activity.name, " (", id, ") -> ",
+             signup_result_text(result));
+    if (participation_reminder &&
+        (result == SignupResult::success || result == SignupResult::already_joined)) {
+        schedule_participation_reminder(session, token, cfg, activity);
+    }
     const auto message = activity_notification_message(activity);
-    const auto title = activity.name + title_suffix + "! ";
+    const auto title = activity.name + signup_title_suffix(result) + "! ";
     notify_ntfy(session, cfg, title, message);
 }
 
@@ -1061,6 +1263,7 @@ static void run_service(Session& session, Config cfg, bool ignore_version,
     auto token_state = std::make_shared<ServiceTokenState>();
     std::string token = ensure_service_token(session, cfg, *token_state);
     int round = 0;
+    bool startup_scan = true;
     while (true) {
         ++round;
         cfg = load_config();
@@ -1070,19 +1273,25 @@ static void run_service(Session& session, Config cfg, bool ignore_version,
         ADVANCE_MS = cfg.advance_ms;
         if (cfg.username.empty() || cfg.password.empty() || cfg.school_id == 0) {
             LOG_ERR("服务刷新跳过: config.json 的 username/password/sid 不完整");
-        } else if (is_service_rest_time(cfg)) {
-            LOG_INFO("当前处于休息时段 ", cfg.service_rest_time, ", 跳过活动列表请求");
         } else {
             token = ensure_service_token(session, cfg, *token_state);
-            LOG_INFO("服务模式第 ", round, " 轮开始扫描");
-            bool auth_failed = false;
-            const auto schedule = load_course_schedule(course_filter);
-            auto activities = list_possible_activities(session, token, cfg, schedule, &auth_failed);
-            if (auth_failed) {
-                LOG_WARN("活动列表认证失败, 重新登录后重试本轮");
-                token = refresh_service_token(session, cfg, *token_state);
-                activities = list_possible_activities(session, token, cfg, schedule);
-            }
+            restore_participation_reminders(session, token, cfg);
+            const bool bypass_rest_time = startup_scan;
+            startup_scan = false;
+            if (!bypass_rest_time && is_service_rest_time(cfg)) {
+                LOG_INFO("当前处于 service_rest_time, 本轮跳过活动列表扫描");
+            } else {
+                if (bypass_rest_time && !cfg.service_rest_time.empty())
+                    LOG_INFO("服务模式启动立刻扫描一次活动列表");
+                LOG_INFO("服务模式第 ", round, " 轮开始扫描");
+                bool auth_failed = false;
+                const auto schedule = load_course_schedule(course_filter);
+                auto activities = list_possible_activities(session, token, cfg, schedule, &auth_failed);
+                if (auth_failed) {
+                    LOG_WARN("活动列表认证失败, 重新登录后重试本轮");
+                    token = refresh_service_token(session, cfg, *token_state);
+                    activities = list_possible_activities(session, token, cfg, schedule);
+                }
             std::stable_sort(activities.begin(), activities.end(),
                 [](const ActivityInfo& left, const ActivityInfo& right) {
                     if (left.joinStartTime != right.joinStartTime)
@@ -1119,9 +1328,7 @@ static void run_service(Session& session, Config cfg, bool ignore_version,
                         std::lock_guard<std::mutex> lock(g_scheduled_tasks_mtx);
                         g_scheduled_tasks[activity_id] = task;
                     }
-                    LOG_OK("创建定时报名任务: ", activity.name, " (", activity.id,
-                             "), 提前 5 分钟启动, 等待 ", std::max<int64_t>(0, wait_ms),
-                             " ms, 报名序号 ", same_start_rank + 1);
+                    log_signup_task_created(activity, true, wait_ms, same_start_rank + 1);
                     std::thread([&session, token_state, cfg, task]() {
                         ActivityInfo current_activity;
                         system_clock::time_point current_start;
@@ -1157,18 +1364,18 @@ static void run_service(Session& session, Config cfg, bool ignore_version,
                         ensure_service_token(session, cfg, *token_state);
                         wait_until(current_start, 0);
                         const auto task_token = ensure_service_token(session, cfg, *token_state);
-                        signup_and_notify(session, task_token, cfg, current_activity);
+                        signup_and_notify(session, task_token, cfg, current_activity, true);
                         std::lock_guard<std::mutex> lock(g_scheduled_tasks_mtx);
                         g_scheduled_tasks.erase(std::to_string(current_activity.id));
                     }).detach();
                 } else {
-                    LOG_OK("创建立即报名任务: ", activity.name, " (", activity.id,
-                             "), 报名序号 ", same_start_rank + 1);
+                    log_signup_task_created(activity, false, 0, same_start_rank + 1);
                     std::thread([&session, token_state, cfg, activity]() {
                         const auto task_token = ensure_service_token(session, cfg, *token_state);
-                        signup_and_notify(session, task_token, cfg, activity);
+                        signup_and_notify(session, task_token, cfg, activity, true);
                     }).detach();
                 }
+            }
             }
         }
         const int refresh_minutes = std::max(1, cfg.service_refresh_minutes);
@@ -1391,3 +1598,4 @@ static CourseSchedule load_course_schedule(bool enabled) {
     }
     return schedule;
 }
+

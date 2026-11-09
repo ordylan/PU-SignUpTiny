@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(PU-SignUpTiny VERSION 2.1.0 DESCRIPTION "OD - MyPUSignUp - Tiny Command-Line Sign-Up Tool" LANGUAGES CXX)
+project(PU-SignUpTiny VERSION 2.1.1 DESCRIPTION "OD - MyPUSignUp - Tiny Command-Line Sign-Up Tool" LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)

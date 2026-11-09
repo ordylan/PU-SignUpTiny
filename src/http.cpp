@@ -152,6 +152,7 @@ HttpResponse request(const char* method, const std::string& url, const std::vect
 
 HttpResponse HttpSession::get(const std::string& url, const std::vector<std::string>& headers, long timeout_seconds) const { return request("GET", url, headers, nullptr, timeout_seconds); }
 HttpResponse HttpSession::post(const std::string& url, const std::vector<std::string>& headers, const std::string& body, long timeout_seconds) const { return request("POST", url, headers, &body, timeout_seconds); }
+HttpResponse HttpSession::del(const std::string& url, const std::vector<std::string>& headers, long timeout_seconds) const { return request("DELETE", url, headers, nullptr, timeout_seconds); }
 #else
 namespace {
 size_t write_body(char* data, size_t size, size_t count, void* target) {
@@ -188,6 +189,7 @@ HttpResponse request(const char* method, const std::string& url, const std::vect
 
 HttpResponse HttpSession::get(const std::string& url, const std::vector<std::string>& headers, long timeout_seconds) const { return request("GET", url, headers, nullptr, timeout_seconds); }
 HttpResponse HttpSession::post(const std::string& url, const std::vector<std::string>& headers, const std::string& body, long timeout_seconds) const { return request("POST", url, headers, &body, timeout_seconds); }
+HttpResponse HttpSession::del(const std::string& url, const std::vector<std::string>& headers, long timeout_seconds) const { return request("DELETE", url, headers, nullptr, timeout_seconds); }
 #endif
 
 } // namespace pu

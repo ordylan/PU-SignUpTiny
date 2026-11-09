@@ -19,6 +19,9 @@ public:
                       const std::vector<std::string>& headers,
                       const std::string& body,
                       long timeout_seconds = 10) const;
+    HttpResponse del(const std::string& url,
+                     const std::vector<std::string>& headers,
+                     long timeout_seconds = 10) const;
 };
 
 } // namespace pu
