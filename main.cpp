@@ -673,12 +673,24 @@ static void cancel_scheduled_task(const std::string& id, const char* reason) {
 
 static bool activity_cache_matches_list(const ActivityInfo& cached,
                                          const json& item) {
-    return item.contains("name") && cached.name == item.value("name", "") &&
-        item.contains("credit") && cached.credit == item.value("credit", 0.0) &&
-        item.contains("joinStartTime") &&
-            cached.joinStartTime == item.value("joinStartTime", "") &&
-        item.contains("startTime") && cached.startTime == item.value("startTime", "") &&
-        item.contains("endTime") && cached.endTime == item.value("endTime", "");
+    if (item.contains("name") && cached.name != item.value("name", "")) return false;
+    if (item.contains("credit") && cached.credit != item.value("credit", 0.0)) return false;
+    if (item.contains("joinStartTime") &&
+        cached.joinStartTime != item.value("joinStartTime", "")) return false;
+    if (item.contains("startTime") && cached.startTime != item.value("startTime", ""))
+        return false;
+    if (item.contains("endTime") && cached.endTime != item.value("endTime", "")) return false;
+    return true;
+}
+
+static bool scheduled_activity_changed(const ActivityInfo& previous,
+                                       const ActivityInfo& current) {
+    return previous.id != current.id || previous.name != current.name ||
+        previous.joinStartTime != current.joinStartTime ||
+        previous.startTime != current.startTime || previous.endTime != current.endTime ||
+        previous.address != current.address || previous.creditName != current.creditName ||
+        previous.credit != current.credit || previous.category != current.category ||
+        previous.allowed_colleges != current.allowed_colleges;
 }
 
 static std::string activity_notification_message(const ActivityInfo& activity) {
@@ -830,7 +842,7 @@ static bool load_cached_activity(const std::string& id, ActivityInfo& info) {
         info.category = b.value("category", "");
         for (const auto& college : b.value("allowed_colleges", json::array()))
             info.allowed_colleges.push_back(college.get<std::string>());
-        LOG_INFO("活动详情缓存命中: ", id);
+       // LOG_INFO("活动详情缓存命中: ", id);
         return true;
     } catch (const std::exception& e) {
         LOG_WARN("读取活动详情缓存失败, 按未命中处理: ", e.what());
@@ -923,14 +935,16 @@ static std::vector<ActivityInfo> list_possible_activities(Session& session,
             if (task) {
                 std::lock_guard<std::mutex> lock(task->mutex);
                 const auto updated_start = parse_dt(info.joinStartTime);
-                if (info.id != 0 && updated_start != system_clock::time_point{} &&
+                if (info.eligible && info.id != 0 && updated_start != system_clock::time_point{} &&
                     !task->cancelled && !task->executing &&
                     task->start > system_clock::now()) {
-                    task->activity = info;
-                    task->start = updated_start;
-                    task->changed.notify_one();
-                    LOG_INFO("已更新活动对应定时任务: ", id,
-                             " | ", info.name, " | 报名时间: ", info.joinStartTime);
+                    if (scheduled_activity_changed(task->activity, info)) {
+                        task->activity = info;
+                        task->start = updated_start;
+                        task->changed.notify_one();
+                        LOG_INFO("已更新活动对应定时任务: ", id,
+                                 " | ", info.name, " | 报名时间: ", info.joinStartTime);
+                    }
                 }
             }
         }

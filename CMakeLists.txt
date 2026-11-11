@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(PU-SignUpTiny VERSION 2.1.1 DESCRIPTION "OD - MyPUSignUp - Tiny Command-Line Sign-Up Tool" LANGUAGES CXX)
+project(PU-SignUpTiny VERSION 2.1.2 DESCRIPTION "OD - MyPUSignUp - Tiny Command-Line Sign-Up Tool" LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -32,18 +32,29 @@ if(MINGW)
         -static
         -static-libgcc
         -static-libstdc++
+        $<$<CONFIG:Release>:-s>
     )
 endif()
 
 include(GNUInstallDirs)
-install(TARGETS pu-signup-tiny RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
-install(FILES config.example.json DESTINATION .)
-install(FILES mycourse.example.json DESTINATION .)
-install(FILES README.md LICENSE DESTINATION ${CMAKE_INSTALL_DOCDIR})
-install(DIRECTORY libs/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/pu-signup-tiny)
+install(TARGETS pu-signup-tiny RUNTIME DESTINATION .)
+install(FILES
+    config.example.json
+    mycourse.example.json
+    README.md
+    LICENSE
+    myqrcode.html
+    DESTINATION .
+)
 
 set(CPACK_PACKAGE_NAME "pu-signup-tiny")
 set(CPACK_PACKAGE_VERSION ${PROJECT_VERSION})
 set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "OD - MyPUSignUp - Tiny Command-Line Sign-Up Tool")
+if(WIN32)
+    set(CPACK_SYSTEM_NAME "windows-x64")
+else()
+    set(CPACK_SYSTEM_NAME "linux-x64")
+endif()
+set(CPACK_PACKAGE_FILE_NAME "${CPACK_PACKAGE_NAME}-${CPACK_SYSTEM_NAME}")
 set(CPACK_GENERATOR "ZIP")
 include(CPack)
