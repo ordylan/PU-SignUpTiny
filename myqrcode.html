@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>PU 活动签到二维码生成器</title>
+  <title>我的PU活动签到二维码</title>
   <style>
     * { box-sizing: border-box; }
     html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
@@ -26,6 +26,9 @@
     .record { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; padding: 10px 12px; background: #fff; border: 1px solid #e5e6e8; border-radius: 4px; }
     .record-name { flex: 1; overflow: hidden; color: #1677ff; text-overflow: ellipsis; white-space: nowrap; }
     .delete { border: 0; background: transparent; color: #d4380d; }
+    .share { border: 0; background: transparent; color: #1677ff; }
+    .share-value { padding: 9px 10px; background: #f7f7f7; border: 1px solid #e5e6e8; border-radius: 4px; word-break: break-all; }
+    .ghost { width: 100%; margin-top: 8px; padding: 10px; border: 1px solid #cfd2d6; border-radius: 4px; background: #fff; color: #444; }
     .empty { color: #888; }
 .aminui {
   display: flex;
@@ -291,6 +294,65 @@
     const app = document.getElementById("app");
     let qrTimer = null;
 
+    const MASK = 1152921504606846975n; // 2^60 - 1 最大的mask  我也乱写呵呵! (按安全标准应该随机生成)
+    const ALPHABET = "ORDYLAN_BCEFGHIJKMPQSTUVWXZ4567890123bcefghijkmpqstuvwxz-ordylan";
+    function packId(idStr) {
+      let n = (BigInt(idStr) ^ MASK) & ((1n << 60n) - 1n);
+      let s = "";
+      for (let i = 0; i < 10; i++) { s = ALPHABET[Number(n & 63n)] + s; n >>= 6n; }
+      return s;
+    }
+    function unpackId(code) {
+      if (!code || code.length !== 10) throw new Error("分享链接无效.");
+      let n = 0n;
+      for (const ch of code) {
+        const index = ALPHABET.indexOf(ch);
+        if (index < 0) throw new Error("分享链接无效.");
+        n = (n << 6n) | BigInt(index);
+      }
+      return ((n ^ MASK) & ((1n << 60n) - 1n)).toString();
+    }
+    function shareUrl(record) {
+      return location.href.split("#")[0].split("?")[0] + "?s=" + packId(record.uid) + "." + packId(record.student);
+    }
+    function clearShareParam() {
+      try { history.replaceState(null, "", location.href.split("?")[0]); } catch (error) {}
+    }
+    async function copyShare(record) {
+      const url = shareUrl(record);
+      const text = `好事分享! 我的PU活动让给你啦! 记得及时签到哦! 我的二维码: \n ${url}`;
+      try {
+        if (!navigator.clipboard) throw new Error("clipboard unavailable");
+        await navigator.clipboard.writeText(text);
+        alert("已复制分享内容");
+      } catch (error) {
+        const input = document.createElement("textarea");
+        input.value = text;
+        input.style.cssText = "position:fixed;left:-9999px";
+        document.body.appendChild(input);
+        input.select();
+        let copied = false;
+        try { copied = document.execCommand("copy"); } catch (e) {}
+        input.remove();
+        if (copied) alert("已复制分享内容");
+        else prompt("请手动复制:", text);
+      }
+    }
+    function openFromUrl() {
+      const code = new URLSearchParams(location.search).get("s");
+      if (!code) return false;
+      try {
+        const parts = code.split(".");
+        if (parts.length !== 2) throw new Error("分享链接无效.");
+        renderShare({ uid: unpackId(parts[0]), student: unpackId(parts[1]) });
+      } catch (error) {
+        clearShareParam();
+        alert(error.message || "分享链接无效.");
+        renderManager();
+      }
+      return true;
+    }
+
     function stopQrTimer() {
       if (qrTimer !== null) {
         clearInterval(qrTimer);
@@ -325,6 +387,7 @@
       list.innerHTML = records.length ? records.map(record => `
         <div class="record">
           <button class="record-name" data-open="${record.id}">${escapeHtml(record.remark)}</button>
+          <button class="share" data-share="${record.id}">分享</button>
           <button class="delete" data-delete="${record.id}" aria-label="删除">删除</button>
         </div>`).join("") : '<div class="empty">暂无记录</div>';
 
@@ -359,10 +422,15 @@
 
       list.addEventListener("click", event => {
         const openId = event.target.dataset.open;
+        const shareId = event.target.dataset.share;
         const deleteId = event.target.dataset.delete;
         if (openId) {
           const record = readRecords().find(item => item.id === openId);
           if (record) renderQr(record);
+        }
+        if (shareId) {
+          const record = readRecords().find(item => item.id === shareId);
+          if (record) copyShare(record);
         }
         if (deleteId && confirm("删除这条记录?")) {
           writeRecords(readRecords().filter(item => item.id !== deleteId));
@@ -398,6 +466,39 @@
         counter.textContent = seconds + "s";
         if (seconds <= 0) { seconds = 15; draw(); }
       }, 1000);
+    }
+
+    function renderShare(record) {
+      stopQrTimer();
+      app.className = "";
+      app.innerHTML = `
+        <main class="manager">
+          <h1>朋友, 好好享受美好的PU活动吧!</h1>
+          <section class="form">
+            <div class="field"><label>我的学号</label><div class="share-value">${escapeHtml(record.student)}</div></div>
+            <div class="field"><label>我的UID</label><div class="share-value">${escapeHtml(record.uid)}</div></div>
+            <div class="field"><label for="share-remark">备注</label><input id="share-remark" maxlength="40" placeholder="如舍友"></div>
+            <button class="primary" id="share-save">保存到本地</button>
+            <button class="ghost" id="share-temp">临时-直接展示</button>
+            <button class="ghost" id="share-cancel">取消</button>
+          </section>
+        </main>`;
+      document.getElementById("share-save").addEventListener("click", () => {
+        const remark = document.getElementById("share-remark").value.trim();
+        const saved = { ...record, id: String(Date.now()), remark: remark || "分享的账号" };
+        writeRecords([...readRecords(), saved]);
+        clearShareParam();
+        renderQr(saved);
+      });
+      document.getElementById("share-temp").addEventListener("click", () => {
+        const remark = document.getElementById("share-remark").value.trim();
+        clearShareParam();
+        renderQr({ ...record, remark: remark || "临时二维码" });
+      });
+      document.getElementById("share-cancel").addEventListener("click", () => {
+        clearShareParam();
+        renderManager();
+      });
     }
 
     function enterFullscreen() {
@@ -462,7 +563,7 @@
       return String(value).replace(/[&<>"']/g, char => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;" }[char]));
     }
 
-    renderManager();
+    if (!openFromUrl()) renderManager();
   </script>
 </body>
 </html>
