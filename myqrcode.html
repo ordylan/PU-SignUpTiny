@@ -312,8 +312,34 @@
       }
       return ((n ^ MASK) & ((1n << 60n) - 1n)).toString();
     }
+    const NUM_ID = /^\d{1,17}$/;
+    const encodeId = value => NUM_ID.test(value)
+      ? "a" + packId("1" + value)
+      : "b" + btoa(String.fromCharCode(...new TextEncoder().encode(String(value)))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+    const decodeId = seg => {
+      if (!seg) throw new Error("分享链接无效.");
+      const mode = seg[0];
+      const body = seg.slice(1);
+      if (mode === "a") {
+        const value = unpackId(body);
+        //巧妙的一个设计--BigInt 吞掉前导 0, 编码前补 1 作为定长标记
+        if (!/^1\d+$/.test(value)) throw new Error("分享链接无效.");
+        return value.slice(1);
+      }
+      if (mode === "b") {
+        try {
+          const base64 = body.replace(/-/g, "+").replace(/_/g, "/");
+          const value = new TextDecoder("utf-8", { fatal: true }).decode(Uint8Array.from(atob(base64 + "=".repeat((4 - body.length % 4) % 4)), ch => ch.charCodeAt(0)));
+          if (!value) throw new Error("分享链接无效.");
+          return value;
+        } catch (error) {
+          throw new Error("分享链接无效.");
+        }
+      }
+      throw new Error("分享链接无效.");
+    };
     function shareUrl(record) {
-      return location.href.split("#")[0].split("?")[0] + "?s=" + packId(record.uid) + "." + packId(record.student);
+      return location.href.split("#")[0].split("?")[0] + "?s=" + encodeId(record.uid) + "." + encodeId(record.student);
     }
     function clearShareParam() {
       try { history.replaceState(null, "", location.href.split("?")[0]); } catch (error) {}
@@ -344,7 +370,7 @@
       try {
         const parts = code.split(".");
         if (parts.length !== 2) throw new Error("分享链接无效.");
-        renderShare({ uid: unpackId(parts[0]), student: unpackId(parts[1]) });
+        renderShare({ uid: decodeId(parts[0]), student: decodeId(parts[1]) });
       } catch (error) {
         clearShareParam();
         alert(error.message || "分享链接无效.");
